@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+data/
+backups/
+build/
+dist/
+*.zip
+server.err.log
+server.out.log
+.venv/
+_fix_views_phase1.py

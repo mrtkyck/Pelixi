@@ -1,0 +1,18 @@
+MyNotes Yerel Ag Kullanimi
+
+1. Ana bilgisayarda:
+   Ac-Notes-LAN.bat dosyasini calistirin.
+
+2. Bu bilgisayarda tarayicida acilan adres:
+   http://127.0.0.1:8000/
+
+3. Diger bilgisayarlarin baglanacagi adres:
+   http://192.168.1.194:8000/
+
+4. Eger diger bilgisayar baglanamiyorsa:
+   Ac-MyNotes-Firewall.bat dosyasini yonetici olarak calistirin.
+
+Notlar:
+- Bu adres ayni modem / ayni Wi-Fi agi icin gecerlidir.
+- Ana bilgisayarin IP adresi degisirse baglanti adresi de degisir.
+- Tum kullanicilar ayni veritabaniyla calisir.
