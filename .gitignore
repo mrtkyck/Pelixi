@@ -9,3 +9,15 @@ server.err.log
 server.out.log
 .venv/
 _fix_views_phase1.py
+.env
+.vscode/
+*.out
+*.err
+.runtime_server.out
+.runtime_server.err
+.tmp_server.out
+.tmp_server.err
+notif_debug.out
+notif_debug.err
+start_debug.out
+start_debug.err

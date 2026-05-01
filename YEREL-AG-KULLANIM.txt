@@ -1,0 +1,27 @@
+MyNotes Yerel Ag Kullanim
+
+1. Ana bilgisayarda once bir kez:
+Ac-MyNotes-Firewall.bat
+
+2. Sonra uygulamayi yerel ag modunda ac:
+Ac-Notes-LAN.bat
+
+3. Acilan pencerede su iki bilgi gorunur:
+- Bu bilgisayarda acilacak adres
+- Diger bilgisayarlar icin adres
+
+4. Ayni Wi-Fi veya ayni yerel agdaki diger kullanicilar:
+Tarayicida ekranda yazan "Diger bilgisayarlar icin adres" satirindaki adrese gider.
+Ornek:
+http://192.168.1.91:8000/
+
+5. Her kullanici:
+- Kendi kullanici adi ve sifresi ile giris yapar
+- Sadece yetkili oldugu alanlari gorur
+- Paylasilan kayitlari kullanabilir
+
+Notlar:
+- Ana bilgisayar acik kalmalidir.
+- Ana bilgisayar uyku moduna gecerse diger kullanicilar baglanamaz.
+- Modem veya Wi-Fi degisirse IP adresi degisebilir. Bu durumda Ac-Notes-LAN.bat yeniden calistirilmalidir.
+- Ilk pilot kullanim icin 3-5 kisi idealdir.
