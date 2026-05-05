@@ -13,6 +13,7 @@ _fix_views_phase1.py
 .vscode/
 *.out
 *.err
+*.log
 .runtime_server.out
 .runtime_server.err
 .tmp_server.out

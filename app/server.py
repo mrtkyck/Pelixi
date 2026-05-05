@@ -133,6 +133,9 @@ class MyNotesHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
+        if parsed.path in {"/health", "/healthz"}:
+            self.respond(HTTPStatus.OK, b"ok", content_type="text/plain; charset=utf-8")
+            return
         if parsed.path.startswith("/static/"):
             self.serve_static(parsed.path)
             return

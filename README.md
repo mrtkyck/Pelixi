@@ -70,6 +70,13 @@ Cloud gecisi icin SQLite -> PostgreSQL migration omurgasi hazirlanmistir.
 Detayli notlar:
 - `docs/postgresql-migration.md`
 
+## Hizli Pilot Yayina Alma
+
+Render uzerinde 3-4 kullanicilik hizli pilot acma adimlari:
+- `docs/cloud-pilot-deploy.md`
+
+Uygulama artik cloud ortaminda verilen `PORT` degiskenini otomatik kullanir.
+
 ## Onerilen Sonraki Teknik Adim
 
 Bu ilk surum hizli baslangic icin sade tutuldu. Ileride su yone buyutulebilir:
