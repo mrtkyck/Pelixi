@@ -312,7 +312,8 @@ def layout(
     return html.encode("utf-8")
 
 
-def auth_layout(title: str, body: str) -> bytes:
+def auth_layout(title: str, body: str, card_class: str = "") -> bytes:
+    card_classes = "auth-card" + (f" {card_class}" if card_class else "")
     html = f"""
     <!doctype html>
     <html lang="tr">
@@ -332,7 +333,7 @@ def auth_layout(title: str, body: str) -> bytes:
               <span class="auth-brand-fallback" style="display:none;">PELIXI</span>
             </div>
           </div>
-          <section class="auth-card">
+          <section class="{card_classes}">
             {body}
           </section>
           <div class="auth-footer-meta">© 2026 Pelixi <span>•</span> Gizlilik <span>•</span> Şartlar</div>

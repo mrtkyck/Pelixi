@@ -6026,6 +6026,12 @@ body {
   padding: 28px 26px 24px;
 }
 
+.auth-card-login {
+  width: min(100%, 548px);
+  min-height: 620px;
+  padding: 30px 24px 22px;
+}
+
 .auth-copy-login .eyebrow {
   margin-bottom: 4px;
   letter-spacing: 0.18em;
@@ -6033,21 +6039,21 @@ body {
 
 .auth-copy-login h2 {
   margin: 0 0 4px;
-  font-size: clamp(1.2rem, 2vw, 1.6rem);
-  line-height: 1.04;
+  font-size: clamp(1.65rem, 2.2vw, 2rem);
+  line-height: 1.08;
   color: #111827;
   font-weight: 700;
 }
 
 .auth-copy-login p:last-child {
-  margin: 0 0 18px;
+  margin: 0 0 20px;
   color: #6b7280;
-  font-size: 0.8rem;
-  line-height: 1.38;
+  font-size: 0.84rem;
+  line-height: 1.5;
 }
 
 .auth-form-login {
-  gap: 13px;
+  gap: 14px;
 }
 
 .auth-field-login > span,
@@ -6077,7 +6083,7 @@ body {
 }
 
 .auth-field-login {
-  gap: 5px;
+  gap: 6px;
 }
 
 .auth-input-shell {
@@ -6085,7 +6091,7 @@ body {
   grid-template-columns: 24px minmax(0, 1fr) auto;
   align-items: center;
   gap: 7px;
-  min-height: 42px;
+  min-height: 44px;
   padding: 0 11px 0 12px;
   border: 1px solid rgba(217, 223, 231, 1);
   border-radius: 12px;
@@ -6177,7 +6183,7 @@ body {
 }
 
 .auth-inline-note-login {
-  margin-top: 1px;
+  margin-top: 3px;
 }
 
 .auth-check {
@@ -6228,6 +6234,16 @@ body {
   line-height: 1;
 }
 
+.auth-card-login .auth-help-note {
+  min-height: 20px;
+}
+
+.auth-card-login .auth-form-login::after {
+  content: "";
+  display: block;
+  min-height: 16px;
+}
+
 .auth-footer-meta {
   color: #7b8698;
   font-size: 0.64rem;
@@ -6248,6 +6264,12 @@ body {
     width: min(100%, 92vw);
     min-height: auto;
     padding: 22px 18px 20px;
+  }
+
+  .auth-card-login {
+    width: min(100%, 92vw);
+    min-height: auto;
+    padding: 24px 20px 20px;
   }
 
   .auth-copy-login h2 {
@@ -6286,6 +6308,12 @@ body {
     width: min(100%, 430px);
     min-height: auto;
     padding: 22px 18px 18px;
+  }
+
+  .auth-card-login {
+    width: min(100%, 452px);
+    min-height: auto;
+    padding: 24px 20px 18px;
   }
 
   .auth-copy-login h2 {

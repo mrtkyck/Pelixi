@@ -13,6 +13,8 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_APP_DIR = Path(os.getenv("LOCALAPPDATA", str(BASE_DIR))) / "MyNotes"
 FALLBACK_APP_DIR = BASE_DIR / ".mynotes-local"
+DB_BACKEND = (os.getenv("PELIXI_DB_BACKEND") or os.getenv("MYNOTES_DB_BACKEND") or "sqlite").strip().lower()
+DATABASE_URL = (os.getenv("DATABASE_URL") or "").strip()
 
 
 def _is_sqlite_path_writable(db_path: Path) -> bool:
@@ -39,6 +41,108 @@ APP_DIR = _resolve_app_dir()
 DATA_DIR = APP_DIR / "data"
 DB_PATH = DATA_DIR / "my_notes.db"
 BACKUP_DIR = APP_DIR / "backups"
+
+
+def get_database_backend() -> str:
+    return DB_BACKEND
+
+
+def is_sqlite_backend() -> bool:
+    return get_database_backend() == "sqlite"
+
+
+def get_database_target() -> str:
+    if is_sqlite_backend():
+        return str(DB_PATH)
+    return DATABASE_URL or "DATABASE_URL tanimli degil"
+
+
+def _ensure_sqlite_backend(feature_name: str) -> None:
+    if is_sqlite_backend():
+        return
+    raise NotImplementedError(
+        f"{feature_name} henuz '{get_database_backend()}' icin hazir degil. "
+        "PostgreSQL gecisinde bu katman bir sonraki adimda tamamlanacak."
+    )
+
+
+def _sql_string_agg(expression: str, delimiter: str = ",", order_by: str = "") -> str:
+    if is_sqlite_backend():
+        return f"GROUP_CONCAT({expression}, '{delimiter}')"
+    ordered = f" ORDER BY {order_by}" if order_by else ""
+    return f"string_agg({expression}, '{delimiter}'{ordered})"
+
+
+def _sql_current_session_cutoff() -> str:
+    if is_sqlite_backend():
+        return "datetime('now', 'localtime')"
+    return "CURRENT_TIMESTAMP"
+
+
+def _sql_date_value(value_placeholder: str = "?") -> str:
+    if is_sqlite_backend():
+        return f"date({value_placeholder})"
+    return f"CAST({value_placeholder} AS DATE)"
+
+
+def _sql_date_column(column_name: str) -> str:
+    if is_sqlite_backend():
+        return f"date({column_name})"
+    return f"CAST({column_name} AS DATE)"
+
+
+def _sql_placeholders(count: int) -> str:
+    return ",".join("?" for _ in range(max(0, count)))
+
+
+def _sql_insert_ignore(table_name: str, columns: tuple[str, ...]) -> str:
+    column_sql = ", ".join(columns)
+    placeholders = _sql_placeholders(len(columns))
+    if is_sqlite_backend():
+        return f"INSERT OR IGNORE INTO {table_name} ({column_sql}) VALUES ({placeholders})"
+    return (
+        f"INSERT INTO {table_name} ({column_sql}) VALUES ({placeholders}) "
+        "ON CONFLICT DO NOTHING"
+    )
+
+
+def _get_table_columns(connection: sqlite3.Connection, table_name: str) -> list[sqlite3.Row]:
+    _ensure_sqlite_backend("Tablo kolon kontrolu")
+    return connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+
+
+def _get_last_insert_id(cursor, feature_name: str = "Kayit ekleme") -> int:
+    if is_sqlite_backend():
+        return int(cursor.lastrowid)
+    raise NotImplementedError(
+        f"{feature_name} icin son eklenen kayit kimligi henuz '{get_database_backend()}' icin hazir degil."
+    )
+
+
+USER_DETAIL_SELECT = (
+    "users.*, "
+    "companies.name AS company_name, companies.code AS company_code, "
+    "branches.name AS branch_name, branches.code AS branch_code, "
+    f"(SELECT {_sql_string_agg('companies.name', ', ')} FROM user_companies "
+    " INNER JOIN companies ON companies.id = user_companies.company_id "
+    " WHERE user_companies.user_id = users.id) AS company_names, "
+    f"(SELECT {_sql_string_agg('companies.code', ',')} FROM user_companies "
+    " INNER JOIN companies ON companies.id = user_companies.company_id "
+    " WHERE user_companies.user_id = users.id) AS company_codes, "
+    f"(SELECT {_sql_string_agg('CAST(user_companies.company_id AS TEXT)', ',')} FROM user_companies "
+    " WHERE user_companies.user_id = users.id) AS company_ids, "
+    f"(SELECT {_sql_string_agg('branches.name', ', ')} FROM user_branches "
+    " INNER JOIN branches ON branches.id = user_branches.branch_id "
+    " WHERE user_branches.user_id = users.id) AS branch_names, "
+    f"(SELECT {_sql_string_agg('branches.code', ',')} FROM user_branches "
+    " INNER JOIN branches ON branches.id = user_branches.branch_id "
+    " WHERE user_branches.user_id = users.id) AS branch_codes, "
+    f"(SELECT {_sql_string_agg('CAST(user_branches.branch_id AS TEXT)', ',')} FROM user_branches "
+    " WHERE user_branches.user_id = users.id) AS branch_ids, "
+    f"(SELECT {_sql_string_agg('roles.code', ',')} FROM user_roles "
+    " INNER JOIN roles ON roles.id = user_roles.role_id "
+    " WHERE user_roles.user_id = users.id) AS role_codes "
+)
 
 
 SCHEMA_STATEMENTS = [
@@ -479,6 +583,7 @@ DEFAULT_FILE_SETTINGS = {
 
 
 def get_connection() -> sqlite3.Connection:
+    _ensure_sqlite_backend("Veritabani baglantisi")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
@@ -486,6 +591,7 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_db() -> None:
+    _ensure_sqlite_backend("Veritabani kurulumu")
     _create_daily_backup()
     with get_connection() as connection:
         for statement in SCHEMA_STATEMENTS:
@@ -514,6 +620,7 @@ def init_db() -> None:
 
 
 def reset_database() -> None:
+    _ensure_sqlite_backend("Veritabani sifirlama")
     if DB_PATH.exists():
         DB_PATH.unlink()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -521,6 +628,7 @@ def reset_database() -> None:
 
 
 def _create_daily_backup() -> None:
+    _ensure_sqlite_backend("Gunluk yedekleme")
     if not DB_PATH.exists():
         return
     try:
@@ -535,6 +643,7 @@ def _create_daily_backup() -> None:
 
 
 def _backup_database_to(target_path: Path) -> Path:
+    _ensure_sqlite_backend("Yedekleme")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     if target_path.exists():
@@ -545,6 +654,7 @@ def _backup_database_to(target_path: Path) -> Path:
 
 
 def create_backup_now() -> Path:
+    _ensure_sqlite_backend("Manuel yedekleme")
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     backup_path = BACKUP_DIR / f"my_notes_manual_{stamp}.db"
@@ -557,7 +667,7 @@ def _sync_user_company_links(connection: sqlite3.Connection) -> None:
     ).fetchall()
     for row in rows:
         connection.execute(
-            "INSERT OR IGNORE INTO user_companies (user_id, company_id) VALUES (?, ?)",
+            _sql_insert_ignore("user_companies", ("user_id", "company_id")),
             (row["id"], row["company_id"]),
         )
 
@@ -631,10 +741,10 @@ def list_audit_logs(
         like_value = f"%{search.strip().lower()}%"
         params.extend([like_value, like_value, like_value, like_value])
     if date_from.strip():
-        filters.append("date(audit_logs.created_at) >= date(?)")
+        filters.append(f"{_sql_date_column('audit_logs.created_at')} >= {_sql_date_value()}")
         params.append(date_from.strip())
     if date_to.strip():
-        filters.append("date(audit_logs.created_at) <= date(?)")
+        filters.append(f"{_sql_date_column('audit_logs.created_at')} <= {_sql_date_value()}")
         params.append(date_to.strip())
     if module_name.strip():
         filters.append("audit_logs.module_name = ?")
@@ -688,7 +798,7 @@ def _repair_text_data(connection: sqlite3.Connection) -> None:
     ).fetchall()
     for table_row in tables:
         table_name = table_row["name"]
-        columns = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+        columns = _get_table_columns(connection, table_name)
         column_names = [column["name"] for column in columns]
         text_columns = [column["name"] for column in columns if column["type"].upper() == "TEXT"]
         if "id" not in column_names or not text_columns:
@@ -729,13 +839,13 @@ def _ensure_owned_record_columns(connection: sqlite3.Connection) -> None:
 def _seed_roles_and_permissions(connection: sqlite3.Connection) -> None:
     for code, name, description in DEFAULT_ROLES:
         connection.execute(
-            "INSERT OR IGNORE INTO roles (code, name, description) VALUES (?, ?, ?)",
+            _sql_insert_ignore("roles", ("code", "name", "description")),
             (code, name, description),
         )
 
     for code, name, module_name in DEFAULT_PERMISSIONS:
         connection.execute(
-            "INSERT OR IGNORE INTO permissions (code, name, module_name) VALUES (?, ?, ?)",
+            _sql_insert_ignore("permissions", ("code", "name", "module_name")),
             (code, name, module_name),
         )
 
@@ -753,7 +863,7 @@ def _seed_roles_and_permissions(connection: sqlite3.Connection) -> None:
             if not permission_id:
                 continue
             connection.execute(
-                "INSERT OR IGNORE INTO role_permissions (role_id, permission_id) VALUES (?, ?)",
+                _sql_insert_ignore("role_permissions", ("role_id", "permission_id")),
                 (role_id, permission_id),
             )
 
@@ -778,7 +888,7 @@ def _is_empty(connection: sqlite3.Connection, table_name: str) -> bool:
 def _ensure_column(
     connection: sqlite3.Connection, table_name: str, column_name: str, column_definition: str
 ) -> None:
-    columns = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    columns = _get_table_columns(connection, table_name)
     if any(column["name"] == column_name for column in columns):
         return
     connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
@@ -804,7 +914,7 @@ def execute_insert(query: str, params: tuple = ()) -> int:
     with get_connection() as connection:
         cursor = connection.execute(query, params)
         connection.commit()
-        return int(cursor.lastrowid)
+        return _get_last_insert_id(cursor)
 
 
 def count_users() -> int:
@@ -906,31 +1016,11 @@ def count_users_for_branch(branch_id: int) -> int:
 
 
 USER_DETAIL_SQL = (
-    "SELECT users.*, "
-    "companies.name AS company_name, companies.code AS company_code, "
-    "branches.name AS branch_name, branches.code AS branch_code, "
-    "(SELECT GROUP_CONCAT(companies.name, ', ') FROM user_companies "
-    " INNER JOIN companies ON companies.id = user_companies.company_id "
-    " WHERE user_companies.user_id = users.id) AS company_names, "
-    "(SELECT GROUP_CONCAT(companies.code, ',') FROM user_companies "
-    " INNER JOIN companies ON companies.id = user_companies.company_id "
-    " WHERE user_companies.user_id = users.id) AS company_codes, "
-    "(SELECT GROUP_CONCAT(user_companies.company_id, ',') FROM user_companies "
-    " WHERE user_companies.user_id = users.id) AS company_ids, "
-    "(SELECT GROUP_CONCAT(branches.name, ', ') FROM user_branches "
-    " INNER JOIN branches ON branches.id = user_branches.branch_id "
-    " WHERE user_branches.user_id = users.id) AS branch_names, "
-    "(SELECT GROUP_CONCAT(branches.code, ',') FROM user_branches "
-    " INNER JOIN branches ON branches.id = user_branches.branch_id "
-    " WHERE user_branches.user_id = users.id) AS branch_codes, "
-    "(SELECT GROUP_CONCAT(user_branches.branch_id, ',') FROM user_branches "
-    " WHERE user_branches.user_id = users.id) AS branch_ids, "
-    "(SELECT GROUP_CONCAT(roles.code, ',') FROM user_roles "
-    " INNER JOIN roles ON roles.id = user_roles.role_id "
-    " WHERE user_roles.user_id = users.id) AS role_codes "
-    "FROM users "
-    "LEFT JOIN companies ON companies.id = users.company_id "
-    "LEFT JOIN branches ON branches.id = users.branch_id"
+    "SELECT "
+    + USER_DETAIL_SELECT
+    + "FROM users "
+      "LEFT JOIN companies ON companies.id = users.company_id "
+      "LEFT JOIN branches ON branches.id = users.branch_id"
 )
 
 
@@ -1159,19 +1249,8 @@ def create_user(
 
 def authenticate_user(username: str, password: str) -> sqlite3.Row | None:
     user = fetch_one(
-        "SELECT users.*, companies.name AS company_name, companies.code AS company_code, branches.name AS branch_name, branches.code AS branch_code, "
-        "(SELECT GROUP_CONCAT(companies.name, ', ') FROM user_companies "
-        " INNER JOIN companies ON companies.id = user_companies.company_id "
-        " WHERE user_companies.user_id = users.id) AS company_names, "
-        "(SELECT GROUP_CONCAT(companies.code, ',') FROM user_companies "
-        " INNER JOIN companies ON companies.id = user_companies.company_id "
-        " WHERE user_companies.user_id = users.id) AS company_codes, "
-        "(SELECT GROUP_CONCAT(user_companies.company_id, ',') FROM user_companies WHERE user_companies.user_id = users.id) AS company_ids, "
-        "(SELECT GROUP_CONCAT(branches.name, ', ') FROM user_branches "
-        " INNER JOIN branches ON branches.id = user_branches.branch_id "
-        " WHERE user_branches.user_id = users.id) AS branch_names, "
-        "(SELECT GROUP_CONCAT(user_branches.branch_id, ',') FROM user_branches WHERE user_branches.user_id = users.id) AS branch_ids, "
-        "(SELECT GROUP_CONCAT(roles.code, ',') FROM user_roles INNER JOIN roles ON roles.id = user_roles.role_id WHERE user_roles.user_id = users.id) AS role_codes "
+        "SELECT "
+        + USER_DETAIL_SELECT +
         "FROM users "
         "LEFT JOIN companies ON companies.id = users.company_id "
         "LEFT JOIN branches ON branches.id = users.branch_id "
@@ -1213,12 +1292,12 @@ def set_user_roles(user_id: int, role_codes: list[str]) -> None:
         connection.execute("DELETE FROM user_roles WHERE user_id = ?", (user_id,))
         if role_codes:
             role_rows = connection.execute(
-                f"SELECT id FROM roles WHERE code IN ({','.join('?' for _ in role_codes)})",
+                f"SELECT id FROM roles WHERE code IN ({_sql_placeholders(len(role_codes))})",
                 tuple(role_codes),
             ).fetchall()
             for row in role_rows:
                 connection.execute(
-                    "INSERT OR IGNORE INTO user_roles (user_id, role_id) VALUES (?, ?)",
+                    _sql_insert_ignore("user_roles", ("user_id", "role_id")),
                     (user_id, row["id"]),
                 )
         connection.commit()
@@ -1246,7 +1325,7 @@ def set_user_companies(user_id: int, company_ids: list[int]) -> None:
         connection.execute("DELETE FROM user_companies WHERE user_id = ?", (user_id,))
         for company_id in unique_ids:
             connection.execute(
-                "INSERT OR IGNORE INTO user_companies (user_id, company_id) VALUES (?, ?)",
+                _sql_insert_ignore("user_companies", ("user_id", "company_id")),
                 (user_id, company_id),
             )
         connection.execute(
@@ -1278,7 +1357,7 @@ def set_user_branches(user_id: int, branch_ids: list[int]) -> None:
         connection.execute("DELETE FROM user_branches WHERE user_id = ?", (user_id,))
         for branch_id in unique_ids:
             connection.execute(
-                "INSERT OR IGNORE INTO user_branches (user_id, branch_id) VALUES (?, ?)",
+                _sql_insert_ignore("user_branches", ("user_id", "branch_id")),
                 (user_id, branch_id),
             )
         connection.execute(
@@ -1297,12 +1376,12 @@ def set_role_permissions(role_code: str, permission_codes: list[str]) -> None:
         connection.execute("DELETE FROM role_permissions WHERE role_id = ?", (role_id,))
         if permission_codes:
             permission_rows = connection.execute(
-                f"SELECT id FROM permissions WHERE code IN ({','.join('?' for _ in permission_codes)})",
+                f"SELECT id FROM permissions WHERE code IN ({_sql_placeholders(len(permission_codes))})",
                 tuple(permission_codes),
             ).fetchall()
             for row in permission_rows:
                 connection.execute(
-                    "INSERT OR IGNORE INTO role_permissions (role_id, permission_id) VALUES (?, ?)",
+                    _sql_insert_ignore("role_permissions", ("role_id", "permission_id")),
                     (role_id, row["id"]),
                 )
         connection.commit()
@@ -1360,12 +1439,12 @@ def update_user(
         connection.execute("DELETE FROM user_roles WHERE user_id = ?", (user_id,))
         if role_codes:
             role_rows = connection.execute(
-                f"SELECT id FROM roles WHERE code IN ({','.join('?' for _ in role_codes)})",
+                f"SELECT id FROM roles WHERE code IN ({_sql_placeholders(len(role_codes))})",
                 tuple(role_codes),
             ).fetchall()
             for row in role_rows:
                 connection.execute(
-                    "INSERT OR IGNORE INTO user_roles (user_id, role_id) VALUES (?, ?)",
+                    _sql_insert_ignore("user_roles", ("user_id", "role_id")),
                     (user_id, row["id"]),
                 )
         connection.commit()
@@ -1404,7 +1483,7 @@ def replace_record_user_shares(module_name: str, record_id: int, user_ids: list[
         )
         for user_id in unique_ids:
             connection.execute(
-                "INSERT OR IGNORE INTO record_user_shares (module_name, record_id, user_id) VALUES (?, ?, ?)",
+                _sql_insert_ignore("record_user_shares", ("module_name", "record_id", "user_id")),
                 (module_name, record_id, user_id),
             )
         connection.commit()
@@ -1441,7 +1520,7 @@ def replace_record_role_shares(module_name: str, record_id: int, role_ids: list[
         )
         for role_id in unique_ids:
             connection.execute(
-                "INSERT OR IGNORE INTO record_role_shares (module_name, record_id, role_id) VALUES (?, ?, ?)",
+                _sql_insert_ignore("record_role_shares", ("module_name", "record_id", "role_id")),
                 (module_name, record_id, role_id),
             )
         connection.commit()
@@ -1785,9 +1864,13 @@ def get_session_user(token: str) -> sqlite3.Row | None:
     if not token:
         return None
     with get_connection() as connection:
-        connection.execute("DELETE FROM sessions WHERE expires_at < datetime('now', 'localtime')")
+        session_cutoff = _sql_current_session_cutoff()
+        connection.execute(f"DELETE FROM sessions WHERE expires_at < {session_cutoff}")
         connection.commit()
-        row = connection.execute("SELECT user_id FROM sessions WHERE token = ? AND expires_at >= datetime('now', 'localtime')", (token,)).fetchone()
+        row = connection.execute(
+            f"SELECT user_id FROM sessions WHERE token = ? AND expires_at >= {session_cutoff}",
+            (token,),
+        ).fetchone()
         if row:
             return get_user_by_id(int(row["user_id"]))
     return None

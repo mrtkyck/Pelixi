@@ -1,1 +1,3 @@
-# Bu ilk surum Python standart kutuphanesi ile calisir.
+# Temel uygulama halen Python standart kutuphanesi ile calisir.
+# PostgreSQL migration ve cloud gecisi icin asagidaki surucu gerekir.
+psycopg[binary]>=3.2,<4

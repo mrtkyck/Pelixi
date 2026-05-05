@@ -55,6 +55,21 @@ Ardindan tarayicida su adresi acin:
 http://127.0.0.1:8000
 ```
 
+Pelixi veri klasoru ve sabit yerel port ile calisma ornegi:
+
+```powershell
+$env:MYNOTES_APP_DIR="$env:LOCALAPPDATA\Pelixi"
+$env:MYNOTES_PORT="8011"
+python run.py
+```
+
+## PostgreSQL Gecis Hazirligi
+
+Cloud gecisi icin SQLite -> PostgreSQL migration omurgasi hazirlanmistir.
+
+Detayli notlar:
+- `docs/postgresql-migration.md`
+
 ## Onerilen Sonraki Teknik Adim
 
 Bu ilk surum hizli baslangic icin sade tutuldu. Ileride su yone buyutulebilir:
