@@ -809,14 +809,17 @@ class MyNotesHandler(BaseHTTPRequestHandler):
             start_date = form_data.get("event_date", "").strip()
             end_date = form_data.get("end_date", "").strip() or start_date
             title = form_data.get("title", "").strip()
+            time_range = form_data.get("time_range", "").strip()
+            notes = form_data.get("notes", "").strip()
             db.execute(
-                "INSERT INTO events (title, event_date, end_date, level, notes) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO events (title, event_date, end_date, level, time_range, notes) VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     title,
                     start_date,
                     end_date,
                     ",".join(event_levels),
-                    "",
+                    time_range,
+                    notes,
                 ),
             )
             event_row = db.fetch_one("SELECT id FROM events ORDER BY id DESC LIMIT 1")
@@ -827,14 +830,18 @@ class MyNotesHandler(BaseHTTPRequestHandler):
                 event_levels = _normalize_event_levels(parsed_body.get("level", []))
                 start_date = form_data.get("event_date", "").strip()
                 end_date = form_data.get("end_date", "").strip() or start_date
+                time_range = form_data.get("time_range", "").strip()
+                notes = form_data.get("notes", "").strip()
                 current_row = db.fetch_one("SELECT id, title FROM events WHERE id = ?", (int(item_id),))
                 db.execute(
-                    "UPDATE events SET title = ?, event_date = ?, end_date = ?, level = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    "UPDATE events SET title = ?, event_date = ?, end_date = ?, level = ?, time_range = ?, notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                     (
                         form_data.get("title", "").strip(),
                         start_date,
                         end_date,
                         ",".join(event_levels),
+                        time_range,
+                        notes,
                         int(item_id),
                     ),
                 )
@@ -1720,16 +1727,9 @@ class MyNotesHandler(BaseHTTPRequestHandler):
         if edit_id.isdigit():
             edit_item = db.fetch_one("SELECT * FROM events WHERE id = ?", (int(edit_id),))
         today = datetime.now()
-        calendar_source = items or db.fetch_all("SELECT * FROM events ORDER BY event_date ASC, title ASC")
         if month_param:
             try:
                 ref_date = datetime.strptime(month_param + "-01", "%Y-%m-%d")
-            except ValueError:
-                ref_date = datetime.now()
-        elif calendar_source:
-            first = calendar_source[0]
-            try:
-                ref_date = datetime.strptime(first["event_date"][:10], "%Y-%m-%d")
             except ValueError:
                 ref_date = today
         else:
@@ -1741,8 +1741,12 @@ class MyNotesHandler(BaseHTTPRequestHandler):
                     {
                         "title": item["title"],
                         "level_label": format_event_levels(item["level"]),
+                        "time_range": item["time_range"] if "time_range" in item.keys() else "",
+                        "notes": item["notes"] if "notes" in item.keys() else "",
+                        "is_holiday": False,
                     }
                 )
+        _merge_public_holidays(date_map, ref_date.year)
         if active_view == "year":
             month_label, calendar_html = render_event_year_calendar(ref_date.year, date_map, active_levels)
         else:
@@ -2646,14 +2650,17 @@ class MyNotesHandler(BaseHTTPRequestHandler):
         start_date = form_data.get("event_date", "").strip()
         end_date = form_data.get("end_date", "").strip() or start_date
         title = form_data.get("title", "").strip()
+        time_range = form_data.get("time_range", "").strip()
+        notes = form_data.get("notes", "").strip()
         db.execute(
-            "INSERT INTO events (title, event_date, end_date, level, notes) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO events (title, event_date, end_date, level, time_range, notes) VALUES (?, ?, ?, ?, ?, ?)",
             (
                 title,
                 start_date,
                 end_date,
                 ",".join(event_levels),
-                "",
+                time_range,
+                notes,
             ),
         )
         event_row = db.fetch_one("SELECT id FROM events ORDER BY id DESC LIMIT 1")
@@ -2666,14 +2673,18 @@ class MyNotesHandler(BaseHTTPRequestHandler):
             event_levels = _normalize_event_levels(parsed_body.get("level", []))
             start_date = form_data.get("event_date", "").strip()
             end_date = form_data.get("end_date", "").strip() or start_date
+            time_range = form_data.get("time_range", "").strip()
+            notes = form_data.get("notes", "").strip()
             current_row = db.fetch_one("SELECT id, title FROM events WHERE id = ?", (int(item_id),))
             db.execute(
-                "UPDATE events SET title = ?, event_date = ?, end_date = ?, level = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                "UPDATE events SET title = ?, event_date = ?, end_date = ?, level = ?, time_range = ?, notes = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
                 (
                     form_data.get("title", "").strip(),
                     start_date,
                     end_date,
                     ",".join(event_levels),
+                    time_range,
+                    notes,
                     int(item_id),
                 ),
             )
@@ -4411,6 +4422,40 @@ def _iter_event_days(start_value: str | None, end_value: str | None) -> list[str
         days.append(current.strftime("%Y-%m-%d"))
         current += timedelta(days=1)
     return days
+
+
+def _merge_public_holidays(date_map: dict[str, list[dict[str, str]]], year: int) -> None:
+    for holiday_date, holiday_name in _turkish_public_holidays(year):
+        date_map.setdefault(holiday_date, [])
+        date_map[holiday_date].insert(
+            0,
+            {
+                "title": holiday_name,
+                "level_label": "Resmi tatil",
+                "time_range": "",
+                "notes": "Resmi tatil",
+                "is_holiday": True,
+            },
+        )
+
+
+def _turkish_public_holidays(year: int) -> list[tuple[str, str]]:
+    try:
+        import holidays  # type: ignore
+
+        tr_holidays = holidays.Turkey(years=year, language="tr")
+        return sorted((day.strftime("%Y-%m-%d"), str(name)) for day, name in tr_holidays.items())
+    except Exception:
+        # Kütüphane yoksa uygulama çalışmaya devam etsin; en azından sabit milli tatiller gösterilir.
+        return [
+            (f"{year}-01-01", "Yılbaşı"),
+            (f"{year}-04-23", "Ulusal Egemenlik ve Çocuk Bayramı"),
+            (f"{year}-05-01", "Emek ve Dayanışma Günü"),
+            (f"{year}-05-19", "Atatürk'ü Anma, Gençlik ve Spor Bayramı"),
+            (f"{year}-07-15", "Demokrasi ve Milli Birlik Günü"),
+            (f"{year}-08-30", "Zafer Bayramı"),
+            (f"{year}-10-29", "Cumhuriyet Bayramı"),
+        ]
 
 
 def _format_datetime_label(value: str | None) -> str:

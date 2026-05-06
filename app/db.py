@@ -602,6 +602,7 @@ def init_db() -> None:
         _ensure_column(connection, "tasks", "completed_at", "TEXT")
         _ensure_column(connection, "tasks", "responsible_person", "TEXT")
         _ensure_column(connection, "events", "end_date", "TEXT")
+        _ensure_column(connection, "events", "time_range", "TEXT")
         _ensure_column(connection, "task_change_requests", "owner_hidden_at", "TEXT")
         _ensure_column(connection, "task_change_requests", "requester_hidden_at", "TEXT")
         _ensure_column(connection, "document_change_requests", "owner_hidden_at", "TEXT")

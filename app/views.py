@@ -3,6 +3,7 @@
 from datetime import date, datetime, timedelta
 from html import escape
 import calendar
+import json
 from urllib.parse import urlencode
 
 from app.firm_service import get_active_user_firm_name, get_user_sidebar_meta
@@ -2627,7 +2628,9 @@ def quick_event_form() -> str:
             {event_level_field([])}
             {input_field("event_date", "Başlangıç", input_type="date", value=str(date.today()))}
             {input_field("end_date", "Bitiş", input_type="date", value=str(date.today()))}
+            {input_field("time_range", "Saat aralığı", placeholder="Örnek: 09:00 - 11:30")}
           </div>
+          {textarea_field("notes", "Açıklama", "", "Etkinlik detayı, notlar, hazırlanacaklar...")}
           <div class="task-create-actions">
             <button class="mini-link subtle" type="button" data-close-event-create>Vazgeç</button>
             <button class="button" type="submit">Ekle</button>
@@ -2640,11 +2643,11 @@ def quick_event_form() -> str:
 
 def edit_event_panel(item) -> str:
     end_date = row_value(item, "end_date") or row_value(item, "event_date") or ""
-    return f'<div class="documents-edit-bar"><div class="panel-header"><h3>Etkinliği Düzenle</h3><a class="text-link" href="/events">Vazgeç</a></div><form method="post" action="/events/update" class="quick-task-form compact-inline-form event-inline-form"><input type="hidden" name="id" value="{item["id"]}"><div class="quick-doc-grid event-form-grid">{input_field("title", "Etkinlik", required=True, value=item["title"])}{event_level_field(_split_event_levels(row_value(item, "level")))}{input_field("event_date", "Başlangıç", input_type="date", value=row_value(item, "event_date") or "")}{input_field("end_date", "Bitiş", input_type="date", value=end_date)}<button class="button" type="submit">Güncelle</button></div></form></div>'
+    return f'<div class="documents-edit-bar"><div class="panel-header"><h3>Etkinliği Düzenle</h3><a class="text-link" href="/events">Vazgeç</a></div><form method="post" action="/events/update" class="quick-task-form compact-inline-form event-inline-form"><input type="hidden" name="id" value="{item["id"]}"><div class="quick-doc-grid event-form-grid">{input_field("title", "Etkinlik", required=True, value=item["title"])}{event_level_field(_split_event_levels(row_value(item, "level")))}{input_field("event_date", "Başlangıç", input_type="date", value=row_value(item, "event_date") or "")}{input_field("end_date", "Bitiş", input_type="date", value=end_date)}{input_field("time_range", "Saat aralığı", value=row_value(item, "time_range") or "", placeholder="Örnek: 09:00 - 11:30")}</div><div class="event-edit-actions"><button class="button" type="submit">Güncelle</button></div>{textarea_field("notes", "Açıklama", row_value(item, "notes") or "", "Etkinlik detayı, notlar, hazırlanacaklar...")}</form></div>'
 
 
 def events_page(items: list, quick_form_html: str, active_levels: list[str], level_counts: dict[str, int], active_view: str, month_label: str, calendar_html: str, calendar_nav_html: str, edit_item=None, current_user: dict | None = None, allowed_paths: set[str] | None = None) -> bytes:
-    body = f'<section class="documents-shell"><div class="documents-toolbar"><div><p class="eyebrow">Etkinlik</p><h2>Etkinlik Takvimi</h2></div><span class="badge">{len(items)} etkinlik</span></div><div class="documents-compact-form">{quick_form_html}</div>{edit_event_panel(edit_item) if edit_item else ""}<div class="events-layout"><div class="documents-table-wrap"><div class="panel-header compact-header"><h3>Kademe Filtreleri</h3></div>{event_filter_bar(active_levels, level_counts, active_view)}{events_table_header()}<div class="task-table">{render_events_table(items)}</div></div><div class="documents-table-wrap calendar-panel"><div class="panel-header compact-header"><h3>{escape(month_label)}</h3></div>{calendar_view_bar(active_view, active_levels)}{calendar_nav_html}{calendar_html}</div></div></section>{event_form_script()}'
+    body = f'<section class="documents-shell"><div class="documents-toolbar"><div><p class="eyebrow">Etkinlik</p><h2>Etkinlik Takvimi</h2></div><span class="badge">{len(items)} etkinlik</span></div><div class="documents-compact-form">{quick_form_html}</div>{edit_event_panel(edit_item) if edit_item else ""}<div class="events-layout"><div class="documents-table-wrap"><div class="panel-header compact-header"><h3>Kademe Filtreleri</h3></div>{event_filter_bar(active_levels, level_counts, active_view)}{events_table_header()}<div class="task-table task-table-compact">{render_events_table(items)}</div></div><div class="documents-table-wrap calendar-panel"><div class="panel-header compact-header"><h3>{escape(month_label)}</h3></div>{calendar_view_bar(active_view, active_levels)}{calendar_nav_html}{calendar_html}</div></div></section>{event_detail_dialog_markup()}{calendar_day_dialog_markup()}{event_form_script()}'
     return layout("Etkinlik Takvimi", body, "/events", current_user, allowed_paths)
 
 
@@ -2709,9 +2712,11 @@ def render_event_calendar(year: int, month: int, date_map: dict[str, list[dict]]
             events = date_map.get(key, [])
             muted = " muted" if day_obj.month != month else ""
             today_class = " today" if day_obj == today else ""
+            holiday_day_class = " holiday-day" if any(bool(event.get("is_holiday")) for event in events) else ""
             items = []
             for index, event in enumerate(events[:4]):
-                tone = palette[index % len(palette)]
+                is_holiday = bool(event.get("is_holiday"))
+                tone = "tone-holiday" if is_holiday else palette[index % len(palette)]
                 title = escape(event.get("title", "Etkinlik"))
                 level = escape(event.get("level_label", ""))
                 tooltip = title if not level or level == "Belirtilmedi" else f"{title} - {level}"
@@ -2732,10 +2737,24 @@ def render_event_calendar(year: int, month: int, date_map: dict[str, list[dict]]
             extra = ""
             if len(events) > 4:
                 extra = f'<div class="calendar-more">+{len(events) - 4} etkinlik</div>'
+            day_events_payload = json.dumps(
+                [
+                    {
+                        "title": event.get("title", "Etkinlik"),
+                        "level_label": event.get("level_label", "Belirtilmedi"),
+                        "time_range": event.get("time_range", ""),
+                        "notes": event.get("notes", ""),
+                        "is_holiday": bool(event.get("is_holiday")),
+                    }
+                    for event in events
+                ],
+                ensure_ascii=False,
+            ).replace("</", "<\\/")
             cells.append(
-                f'<div class="calendar-cell{muted}{today_class}">'
-                f'<div class="calendar-day-head"><strong>{day_obj.day}</strong></div>'
+                f'<div class="calendar-cell{muted}{today_class}{holiday_day_class}">'
+                f'<div class="calendar-day-head"><button type="button" class="calendar-day-open" data-calendar-open data-calendar-day="{key}" aria-label="{key} gününü aç"><strong>{day_obj.day}</strong></button></div>'
                 f'<div class="calendar-events">{"".join(items)}{extra}</div>'
+                f'<script type="application/json" data-day-events>{day_events_payload}</script>'
                 f'</div>'
             )
     html = (
@@ -2759,7 +2778,7 @@ def render_event_year_calendar(year: int, date_map: dict[str, list[dict]], activ
 
 
 def events_table_header() -> str:
-    return '<div class="task-header-row event-header-row"><span>Etkinlik</span><span>Kademe</span><span>Tarih</span><span>İşlem</span></div>'
+    return '<div class="task-header-row event-header-row"><span>Etkinlik</span><span>Kademe</span><span>Tarih/Saat</span><span>İşlem</span></div>'
 
 
 def render_events_table(items: list) -> str:
@@ -2769,7 +2788,67 @@ def render_events_table(items: list) -> str:
 
 
 def render_event_row(item) -> str:
-    return f'<article class="task-row document-row event-row"><div class="task-main event-main"><div class="task-cell task-cell-title"><h4>{escape(item["title"])}</h4></div><div class="task-cell">{render_event_level_badges(row_value(item, "level", ""))}</div><div class="task-cell task-cell-date">{escape(format_date_range(row_value(item, "event_date"), row_value(item, "end_date")))}</div><div class="task-cell task-cell-actions"><div class="row-actions"><a class="mini-link" href="/events?edit={item["id"]}">Düzenle</a><form method="post" action="/events/delete" class="inline-form"><input type="hidden" name="id" value="{item["id"]}"><button class="mini-link danger" type="submit">Sil</button></form></div></div></div></article>'
+    title = escape(row_value(item, "title") or "Etkinlik")
+    levels = render_event_level_badges(row_value(item, "level", ""))
+    date_label = escape(format_date_range(row_value(item, "event_date"), row_value(item, "end_date")))
+    time_range = escape(row_value(item, "time_range") or "-")
+    notes = row_value(item, "notes") or ""
+    notes_short = escape((notes[:88] + "...") if len(notes) > 88 else notes) if notes else ""
+    notes_full = escape(notes or "-")
+    return (
+        f'<article class="task-row document-row event-row">'
+        f'<div class="task-main event-main">'
+        f'<div class="task-cell task-cell-title">'
+        f'<button class="event-title-link" type="button" data-event-open '
+        f'data-event-title="{title}" '
+        f'data-event-level="{escape(format_event_levels(row_value(item, "level")))}" '
+        f'data-event-date="{date_label}" '
+        f'data-event-time="{time_range}" '
+        f'data-event-notes="{notes_full}">{title}</button>'
+        f'{f"<small>{notes_short}</small>" if notes_short else ""}'
+        f'</div>'
+        f'<div class="task-cell">{levels}</div>'
+        f'<div class="task-cell task-cell-date"><span>{date_label}</span><small>{time_range}</small></div>'
+        f'<div class="task-cell task-cell-actions"><div class="row-actions event-row-actions">'
+        f'<a class="mini-link icon-link" href="/events?edit={item["id"]}" title="Düzenle" aria-label="Düzenle">&#9998;</a>'
+        f'<form method="post" action="/events/delete" class="inline-form">'
+        f'<input type="hidden" name="id" value="{item["id"]}">'
+        f'<button class="mini-link danger icon-link" type="submit" title="Sil" aria-label="Sil">&#128465;</button>'
+        f'</form></div></div></div></article>'
+    )
+
+
+def event_detail_dialog_markup() -> str:
+    return """
+    <dialog class="task-create-dialog event-detail-dialog" data-event-detail-dialog>
+      <div class="task-create-dialog-card event-detail-card">
+        <div class="panel-header task-create-header">
+          <div><h3 data-event-detail-title>Etkinlik Detayı</h3></div>
+          <button class="task-dialog-close" type="button" data-event-detail-close aria-label="Kapat">×</button>
+        </div>
+        <div class="event-detail-grid">
+          <div><span>Tarih</span><strong data-event-detail-date>-</strong></div>
+          <div><span>Saat aralığı</span><strong data-event-detail-time>-</strong></div>
+          <div><span>Kademe</span><strong data-event-detail-level>-</strong></div>
+          <div class="event-detail-notes"><span>Açıklama</span><p data-event-detail-notes>-</p></div>
+        </div>
+      </div>
+    </dialog>
+    """
+
+
+def calendar_day_dialog_markup() -> str:
+    return """
+    <dialog class="task-create-dialog event-detail-dialog calendar-day-dialog" data-calendar-day-dialog>
+      <div class="task-create-dialog-card event-detail-card calendar-day-card">
+        <div class="panel-header task-create-header">
+          <div><h3 data-calendar-day-title>Gün Etkinlikleri</h3></div>
+          <button class="task-dialog-close" type="button" data-calendar-day-close aria-label="Kapat">×</button>
+        </div>
+        <div class="calendar-day-list" data-calendar-day-list></div>
+      </div>
+    </dialog>
+    """
 
 
 def event_level_field(selected_levels: list[str]) -> str:
@@ -2805,6 +2884,9 @@ def event_form_script() -> str:
     return """
     <script>
       (() => {
+        if (window.__pelixiEventFormInit) return;
+        window.__pelixiEventFormInit = true;
+
         const eventDialog = document.querySelector('[data-event-create-dialog]');
         if (eventDialog) {
           const openButtons = document.querySelectorAll('[data-open-event-create]');
@@ -2836,14 +2918,49 @@ def event_form_script() -> str:
             if (!inside) closeDialog();
           });
         }
+        const eventForms = [...document.querySelectorAll('.event-inline-form')];
+        const levelDropdowns = [...document.querySelectorAll('.event-inline-form [data-event-level-dropdown]')];
+        const closeLevelDropdowns = (exceptNode = null) => {
+          levelDropdowns.forEach((details) => {
+            if (exceptNode && details === exceptNode) return;
+            details.removeAttribute('open');
+          });
+        };
         const updateDropdown = (details) => {
           const summary = details.querySelector('[data-event-level-summary]');
           const checked = [...details.querySelectorAll('input[type="checkbox"]:checked')].map((node) => node.value);
+          details.querySelectorAll('.event-level-chip').forEach((chip) => {
+            const input = chip.querySelector('input[type="checkbox"]');
+            chip.classList.toggle('active', !!input?.checked);
+          });
           if (summary) summary.textContent = checked.length ? checked.join(', ') : 'Kademe seçin';
         };
-        document.querySelectorAll('[data-event-level-dropdown]').forEach((details) => {
+        levelDropdowns.forEach((details) => {
           updateDropdown(details);
           details.addEventListener('change', () => updateDropdown(details));
+          details.addEventListener('toggle', () => {
+            if (!details.open) return;
+            closeLevelDropdowns(details);
+          });
+        });
+        eventForms.forEach((form) => {
+          form.addEventListener('pointerdown', (event) => {
+            const target = event.target;
+            if (!(target instanceof Element)) return;
+            const activeDetails = levelDropdowns.find((details) => details.contains(target));
+            closeLevelDropdowns(activeDetails || null);
+          });
+          form.addEventListener('focusin', (event) => {
+            const target = event.target;
+            if (!(target instanceof Element)) return;
+            const activeDetails = levelDropdowns.find((details) => details.contains(target));
+            closeLevelDropdowns(activeDetails || null);
+          });
+        });
+        document.addEventListener('keydown', (event) => {
+          if (event.key === 'Escape') {
+            closeLevelDropdowns();
+          }
         });
 
         const syncEventDates = (form) => {
@@ -2873,6 +2990,124 @@ def event_form_script() -> str:
         };
 
         document.querySelectorAll('.event-inline-form').forEach(syncEventDates);
+
+        const detailDialog = document.querySelector('[data-event-detail-dialog]');
+        if (detailDialog) {
+          const closeButtons = detailDialog.querySelectorAll('[data-event-detail-close]');
+          const titleNode = detailDialog.querySelector('[data-event-detail-title]');
+          const dateNode = detailDialog.querySelector('[data-event-detail-date]');
+          const timeNode = detailDialog.querySelector('[data-event-detail-time]');
+          const levelNode = detailDialog.querySelector('[data-event-detail-level]');
+          const notesNode = detailDialog.querySelector('[data-event-detail-notes]');
+
+          const closeDetail = () => {
+            if (typeof detailDialog.close === 'function') {
+              detailDialog.close();
+            } else {
+              detailDialog.removeAttribute('open');
+            }
+          };
+          const openDetail = () => {
+            if (typeof detailDialog.showModal === 'function') {
+              detailDialog.showModal();
+            } else {
+              detailDialog.setAttribute('open', 'open');
+            }
+          };
+
+          document.querySelectorAll('[data-event-open]').forEach((button) => {
+            button.addEventListener('click', () => {
+              if (titleNode) titleNode.textContent = button.dataset.eventTitle || 'Etkinlik Detayı';
+              if (dateNode) dateNode.textContent = button.dataset.eventDate || '-';
+              if (timeNode) timeNode.textContent = button.dataset.eventTime || '-';
+              if (levelNode) levelNode.textContent = button.dataset.eventLevel || '-';
+              if (notesNode) notesNode.textContent = button.dataset.eventNotes || '-';
+              openDetail();
+            });
+          });
+
+          closeButtons.forEach((button) => button.addEventListener('click', closeDetail));
+          detailDialog.addEventListener('click', (event) => {
+            const rect = detailDialog.getBoundingClientRect();
+            const inside = (
+              event.clientX >= rect.left &&
+              event.clientX <= rect.right &&
+              event.clientY >= rect.top &&
+              event.clientY <= rect.bottom
+            );
+            if (!inside) closeDetail();
+          });
+        }
+
+        const dayDialog = document.querySelector('[data-calendar-day-dialog]');
+        if (dayDialog) {
+          const titleNode = dayDialog.querySelector('[data-calendar-day-title]');
+          const listNode = dayDialog.querySelector('[data-calendar-day-list]');
+          const closeButtons = dayDialog.querySelectorAll('[data-calendar-day-close]');
+
+          const closeDayDialog = () => {
+            if (typeof dayDialog.close === 'function') {
+              dayDialog.close();
+            } else {
+              dayDialog.removeAttribute('open');
+            }
+          };
+          const openDayDialog = () => {
+            if (typeof dayDialog.showModal === 'function') {
+              dayDialog.showModal();
+            } else {
+              dayDialog.setAttribute('open', 'open');
+            }
+          };
+          const escapeHtml = (value) => {
+            const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+            return String(value || '').replace(/[&<>"']/g, (m) => map[m]);
+          };
+
+          document.querySelectorAll('[data-calendar-open]').forEach((button) => {
+            button.addEventListener('click', () => {
+              const cell = button.closest('.calendar-cell');
+              const payloadNode = cell?.querySelector('[data-day-events]');
+              const day = button.dataset.calendarDay || '';
+              let events = [];
+              if (payloadNode?.textContent) {
+                try {
+                  events = JSON.parse(payloadNode.textContent);
+                } catch (_) {
+                  events = [];
+                }
+              }
+              if (titleNode) titleNode.textContent = day ? `${day} etkinlikleri` : 'Gün Etkinlikleri';
+              if (listNode) {
+                if (!events.length) {
+                  listNode.innerHTML = '<p class="empty-state">Bu gün için etkinlik yok.</p>';
+                } else {
+                  listNode.innerHTML = events.map((event) => {
+                    const holidayClass = event.is_holiday ? ' holiday' : '';
+                    const title = escapeHtml(event.title || 'Etkinlik');
+                    const level = escapeHtml(event.level_label || 'Belirtilmedi');
+                    const time = escapeHtml(event.time_range || '-');
+                    const notes = escapeHtml(event.notes || '-');
+                    return `<article class="calendar-day-item${holidayClass}"><h4>${title}</h4><p><strong>Kademe:</strong> ${level}</p><p><strong>Saat:</strong> ${time}</p><p><strong>Açıklama:</strong> ${notes}</p></article>`;
+                  }).join('');
+                }
+              }
+              openDayDialog();
+            });
+          });
+
+          closeButtons.forEach((button) => button.addEventListener('click', closeDayDialog));
+          dayDialog.addEventListener('click', (event) => {
+            const rect = dayDialog.getBoundingClientRect();
+            const inside = (
+              event.clientX >= rect.left &&
+              event.clientX <= rect.right &&
+              event.clientY >= rect.top &&
+              event.clientY <= rect.bottom
+            );
+            if (!inside) closeDayDialog();
+          });
+        }
       })();
     </script>
     """
