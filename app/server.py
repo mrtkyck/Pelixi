@@ -1440,111 +1440,171 @@ class MyNotesHandler(BaseHTTPRequestHandler):
 
     def dashboard(self) -> None:
         current_user_id = int(self.current_user["id"])
+        perms = self.current_permissions
         is_admin = "admin" in db.get_user_role_codes(current_user_id)
-        active_document_items, _ = _build_document_items(current_user_id, is_admin)
-        upcoming_document_items = _filter_document_items(active_document_items, ["upcoming"])
-        visible_active_tasks = db.fetch_all(*_build_tasks_query("all", current_user_id, is_admin))
+        mv = {
+            "tasks": "tasks.view" in perms,
+            "documents": "documents.view" in perms,
+            "meetings": "meetings.view" in perms,
+            "events": "events.view" in perms,
+            "suppliers": "suppliers.view" in perms,
+        }
+
         summary = {
-            "pending_tasks": len(visible_active_tasks),
-            "upcoming_documents": len(upcoming_document_items),
-            "meeting_count": db.fetch_one("SELECT COUNT(*) AS count FROM meeting_notes")["count"],
-            "supplier_count": db.fetch_one("SELECT COUNT(*) AS count FROM suppliers")["count"],
-            "event_count": db.fetch_one(
+            "pending_tasks": 0,
+            "upcoming_documents": 0,
+            "meeting_count": 0,
+            "supplier_count": 0,
+            "event_count": 0,
+        }
+        tasks = []
+        documents = []
+        meetings = []
+        suppliers = []
+        events = []
+
+        if mv["tasks"]:
+            visible_active_tasks = db.fetch_all(*_build_tasks_query("all", current_user_id, is_admin))
+            summary["pending_tasks"] = len(visible_active_tasks)
+            tasks = visible_active_tasks[:5]
+
+        if mv["documents"]:
+            active_document_items, _ = _build_document_items(current_user_id, is_admin)
+            upcoming_document_items = _filter_document_items(active_document_items, ["upcoming"])
+            summary["upcoming_documents"] = len(upcoming_document_items)
+            documents = upcoming_document_items[:5]
+
+        if mv["meetings"]:
+            summary["meeting_count"] = db.fetch_one("SELECT COUNT(*) AS count FROM meeting_notes")["count"]
+            meetings = db.fetch_all("SELECT * FROM meeting_notes ORDER BY meeting_date DESC LIMIT 5")
+
+        if mv["suppliers"]:
+            summary["supplier_count"] = db.fetch_one("SELECT COUNT(*) AS count FROM suppliers")["count"]
+            suppliers = db.fetch_all("SELECT * FROM suppliers ORDER BY next_contact_at ASC LIMIT 5")
+
+        if mv["events"]:
+            summary["event_count"] = db.fetch_one(
                 "SELECT COUNT(*) AS count FROM events "
                 "WHERE COALESCE(NULLIF(end_date, ''), event_date) >= date('now', 'localtime')"
-            )["count"],
-        }
-        tasks = visible_active_tasks[:5]
-        documents = upcoming_document_items[:5]
-        meetings = db.fetch_all("SELECT * FROM meeting_notes ORDER BY meeting_date DESC LIMIT 5")
-        suppliers = db.fetch_all("SELECT * FROM suppliers ORDER BY next_contact_at ASC LIMIT 5")
-        events = db.fetch_all(
-            "SELECT * FROM events "
-            "WHERE COALESCE(NULLIF(end_date, ''), event_date) >= date('now', 'localtime') "
-            "ORDER BY event_date ASC LIMIT 5"
+            )["count"]
+            events = db.fetch_all(
+                "SELECT * FROM events "
+                "WHERE COALESCE(NULLIF(end_date, ''), event_date) >= date('now', 'localtime') "
+                "ORDER BY event_date ASC LIMIT 5"
+            )
+
+        alerts = _build_dashboard_alerts(current_user_id, is_admin, perms)
+        self.respond(
+            HTTPStatus.OK,
+            dashboard_page(
+                summary,
+                tasks,
+                documents,
+                meetings,
+                suppliers,
+                events,
+                alerts,
+                mv,
+                self.current_user,
+                self.allowed_paths,
+                theme="light",
+            ),
         )
-        alerts = _build_dashboard_alerts(current_user_id, is_admin)
-        self.respond(HTTPStatus.OK, dashboard_page(summary, tasks, documents, meetings, suppliers, events, alerts, self.current_user, self.allowed_paths, theme="light"))
 
     def notifications_page(self) -> None:
         current_user_id = int(self.current_user["id"])
         is_admin = "admin" in db.get_user_role_codes(current_user_id)
-        groups = _build_notification_groups(current_user_id, is_admin)
+        groups = _build_notification_groups(current_user_id, is_admin, self.current_permissions)
         total_count = sum(len(group.get("items", [])) for group in groups)
         self.respond(HTTPStatus.OK, notifications_page(groups, total_count, self.current_user, self.allowed_paths, theme="light"))
 
     def search_page(self, query: dict[str, list[str]]) -> None:
         raw_query = query.get("q", [""])[0].strip()
         groups: list[dict] = []
+        perms = self.current_permissions
         if raw_query:
             like = f"%{raw_query}%"
-            task_rows = db.fetch_all(
-                "SELECT id, title, due_date FROM tasks "
-                "WHERE title LIKE ? OR description LIKE ? OR responsible_person LIKE ? "
-                "ORDER BY updated_at DESC LIMIT 8",
-                (like, like, like),
-            )
-            document_rows = db.fetch_all(
-                "SELECT id, title, due_date FROM documents "
-                "WHERE title LIKE ? OR description LIKE ? "
-                "ORDER BY updated_at DESC LIMIT 8",
-                (like, like),
-            )
-            meeting_rows = db.fetch_all(
-                "SELECT id, title, meeting_date, agenda, notes, decisions FROM meeting_notes "
-                "WHERE title LIKE ? OR agenda LIKE ? OR notes LIKE ? OR decisions LIKE ? "
-                "ORDER BY meeting_date DESC LIMIT 8",
-                (like, like, like, like),
-            )
-            event_rows = db.fetch_all(
-                "SELECT id, title, event_date, end_date, level FROM events "
-                "WHERE title LIKE ? OR notes LIKE ? OR level LIKE ? "
-                "ORDER BY event_date ASC LIMIT 8",
-                (like, like, like),
-            )
-            supplier_rows = db.fetch_all(
-                "SELECT id, company_name, contact_name, service_type FROM suppliers "
-                "WHERE company_name LIKE ? OR contact_name LIKE ? OR service_type LIKE ? "
-                "ORDER BY company_name ASC LIMIT 8",
-                (like, like, like),
-            )
-            groups = [
-                {
-                    "title": "Görevler",
-                    "items": [
-                        {"href": "/tasks", "title": row["title"], "meta": f"Termin: {row['due_date'] or '-'}"}
-                        for row in task_rows
-                    ],
-                },
-                {
-                    "title": "Evraklar",
-                    "items": [
-                        {"href": "/documents", "title": row["title"], "meta": f"Tarih: {row['due_date'] or '-'}"}
-                        for row in document_rows
-                    ],
-                },
-                {
-                    "title": "Toplantılar",
-                    "items": [
-                        {"href": f"/meetings?meeting={row['id']}", "title": row["title"], "meta": f"Tarih: {row['meeting_date'] or '-'}"}
-                        for row in meeting_rows
-                    ],
-                },
-                {
-                    "title": "Etkinlikler",
-                    "items": [
-                        {"href": "/events", "title": row["title"], "meta": f"{_format_date_range(row['event_date'], row['end_date'])} · {row['level'] or '-'}"}
-                        for row in event_rows
-                    ],
-                },
-                {
-                    "title": "Tedarikçiler",
-                    "items": [
-                        {"href": f"/suppliers?supplier={row['id']}", "title": row["company_name"], "meta": f"{row['contact_name'] or '-'} · {row['service_type'] or '-'}"}
-                        for row in supplier_rows
-                    ],
-                },
-            ]
+            groups = []
+            if "tasks.view" in perms:
+                task_rows = db.fetch_all(
+                    "SELECT id, title, due_date FROM tasks "
+                    "WHERE title LIKE ? OR description LIKE ? OR responsible_person LIKE ? "
+                    "ORDER BY updated_at DESC LIMIT 8",
+                    (like, like, like),
+                )
+                groups.append(
+                    {
+                        "title": "Görevler",
+                        "items": [
+                            {"href": "/tasks", "title": row["title"], "meta": f"Termin: {row['due_date'] or '-'}"}
+                            for row in task_rows
+                        ],
+                    }
+                )
+            if "documents.view" in perms:
+                document_rows = db.fetch_all(
+                    "SELECT id, title, due_date FROM documents "
+                    "WHERE title LIKE ? OR description LIKE ? "
+                    "ORDER BY updated_at DESC LIMIT 8",
+                    (like, like),
+                )
+                groups.append(
+                    {
+                        "title": "Evraklar",
+                        "items": [
+                            {"href": "/documents", "title": row["title"], "meta": f"Tarih: {row['due_date'] or '-'}"}
+                            for row in document_rows
+                        ],
+                    }
+                )
+            if "meetings.view" in perms:
+                meeting_rows = db.fetch_all(
+                    "SELECT id, title, meeting_date, agenda, notes, decisions FROM meeting_notes "
+                    "WHERE title LIKE ? OR agenda LIKE ? OR notes LIKE ? OR decisions LIKE ? "
+                    "ORDER BY meeting_date DESC LIMIT 8",
+                    (like, like, like, like),
+                )
+                groups.append(
+                    {
+                        "title": "Toplantılar",
+                        "items": [
+                            {"href": f"/meetings?meeting={row['id']}", "title": row["title"], "meta": f"Tarih: {row['meeting_date'] or '-'}"}
+                            for row in meeting_rows
+                        ],
+                    }
+                )
+            if "events.view" in perms:
+                event_rows = db.fetch_all(
+                    "SELECT id, title, event_date, end_date, level FROM events "
+                    "WHERE title LIKE ? OR notes LIKE ? OR level LIKE ? "
+                    "ORDER BY event_date ASC LIMIT 8",
+                    (like, like, like),
+                )
+                groups.append(
+                    {
+                        "title": "Etkinlikler",
+                        "items": [
+                            {"href": "/events", "title": row["title"], "meta": f"{_format_date_range(row['event_date'], row['end_date'])} · {row['level'] or '-'}"}
+                            for row in event_rows
+                        ],
+                    }
+                )
+            if "suppliers.view" in perms:
+                supplier_rows = db.fetch_all(
+                    "SELECT id, company_name, contact_name, service_type FROM suppliers "
+                    "WHERE company_name LIKE ? OR contact_name LIKE ? OR service_type LIKE ? "
+                    "ORDER BY company_name ASC LIMIT 8",
+                    (like, like, like),
+                )
+                groups.append(
+                    {
+                        "title": "Tedarikçiler",
+                        "items": [
+                            {"href": f"/suppliers?supplier={row['id']}", "title": row["company_name"], "meta": f"{row['contact_name'] or '-'} · {row['service_type'] or '-'}"}
+                            for row in supplier_rows
+                        ],
+                    }
+                )
             groups = [group for group in groups if group["items"]]
         self.respond(HTTPStatus.OK, search_results_page(raw_query, groups, self.current_user, self.allowed_paths))
 
@@ -4096,61 +4156,70 @@ def _build_document_request_summary(request_type: str, payload: dict, fallback_t
     return " • ".join(changes[:3])
 
 
-def _build_dashboard_alerts(current_user_id: int, is_admin: bool) -> list[dict]:
+def _build_dashboard_alerts(current_user_id: int, is_admin: bool, permissions: set[str]) -> list[dict]:
     alerts: list[dict] = []
 
-    overdue_query, overdue_params = _build_tasks_query("overdue", current_user_id, is_admin)
-    overdue_tasks = db.fetch_all(overdue_query + " LIMIT 3", overdue_params)
-    for row in overdue_tasks:
-        alerts.append(
-            {
-                "tone": "danger",
-                "title": "Geciken görev",
-                "detail": row["title"],
-                "meta": row["due_date"] or "-",
-            }
-        )
+    if "tasks.view" in permissions:
+        overdue_query, overdue_params = _build_tasks_query("overdue", current_user_id, is_admin)
+        overdue_tasks = db.fetch_all(overdue_query + " LIMIT 3", overdue_params)
+        for row in overdue_tasks:
+            alerts.append(
+                {
+                    "tone": "danger",
+                    "title": "Geciken görev",
+                    "detail": row["title"],
+                    "meta": row["due_date"] or "-",
+                }
+            )
 
-    active_document_items, _ = _build_document_items(current_user_id, is_admin)
-    upcoming_docs = _filter_document_items(active_document_items, ["upcoming"])[:3]
-    for row in upcoming_docs:
-        alerts.append(
-            {
-                "tone": "warn",
-                "title": "Yaklaşan evrak",
-                "detail": row["title"],
-                "meta": row["date_label"] or "-",
-            }
-        )
+    if "documents.view" in permissions:
+        active_document_items, _ = _build_document_items(current_user_id, is_admin)
+        upcoming_docs = _filter_document_items(active_document_items, ["upcoming"])[:3]
+        for row in upcoming_docs:
+            alerts.append(
+                {
+                    "tone": "warn",
+                    "title": "Yaklaşan evrak",
+                    "detail": row["title"],
+                    "meta": row["date_label"] or "-",
+                }
+            )
 
-    today_events = db.fetch_all(
-        "SELECT title, event_date, end_date FROM events "
-        "WHERE event_date <= date('now', 'localtime') "
-        "AND COALESCE(NULLIF(end_date, ''), event_date) >= date('now', 'localtime') "
-        "ORDER BY event_date ASC, title ASC LIMIT 3"
-    )
-    for row in today_events:
-        alerts.append(
-            {
-                "tone": "info",
-                "title": "Bugünkü etkinlik",
-                "detail": row["title"],
-                "meta": _format_date_range(row["event_date"], row["end_date"]),
-            }
+    if "events.view" in permissions:
+        today_events = db.fetch_all(
+            "SELECT title, event_date, end_date FROM events "
+            "WHERE event_date <= date('now', 'localtime') "
+            "AND COALESCE(NULLIF(end_date, ''), event_date) >= date('now', 'localtime') "
+            "ORDER BY event_date ASC, title ASC LIMIT 3"
         )
+        for row in today_events:
+            alerts.append(
+                {
+                    "tone": "info",
+                    "title": "Bugünkü etkinlik",
+                    "detail": row["title"],
+                    "meta": _format_date_range(row["event_date"], row["end_date"]),
+                }
+            )
 
     return alerts[:6]
 
 
-def _build_notification_groups(current_user_id: int, is_admin: bool) -> list[dict]:
+def _build_notification_groups(current_user_id: int, is_admin: bool, permissions: set[str]) -> list[dict]:
     settings = db.get_notification_settings(current_user_id)
     active_user_map = {
         int(user["id"]): (user["full_name"] or user["username"] or "Kullanıcı")
         for user in db.list_active_users()
     }
 
-    owner_requests = [_format_task_change_request(row, active_user_map) for row in db.list_pending_task_change_requests(current_user_id)]
-    owner_document_requests = [_format_document_change_request(row, active_user_map) for row in db.list_pending_document_change_requests(current_user_id)]
+    owner_requests = []
+    if "tasks.view" in permissions:
+        owner_requests = [_format_task_change_request(row, active_user_map) for row in db.list_pending_task_change_requests(current_user_id)]
+
+    owner_document_requests = []
+    if "documents.view" in permissions:
+        owner_document_requests = [_format_document_change_request(row, active_user_map) for row in db.list_pending_document_change_requests(current_user_id)]
+
     approval_items = [
         {
             "title": f"{item['requester_name']} talep gönderdi",
@@ -4174,106 +4243,112 @@ def _build_notification_groups(current_user_id: int, is_admin: bool) -> list[dic
         for item in owner_document_requests
     )
 
-    outgoing_rows = db.list_outgoing_pending_task_change_requests(current_user_id)
     outgoing_items = []
-    for row in outgoing_rows:
-        owner_name = row["owner_full_name"] or row["owner_username"] or active_user_map.get(int(row["owner_user_id"]), "Görev sahibi")
-        request_label = "Düzenleme" if row["request_type"] == "update" else "Silme"
-        outgoing_items.append(
-            {
-                "title": f"{request_label} onayı bekliyor",
-                "detail": row["task_title"] or "Görev",
-                "meta": f"Onay: {owner_name}",
-                "href": "/tasks",
-                "action": "Görevlere Git",
-                "tone": "info",
-            }
-        )
-    outgoing_document_rows = db.list_outgoing_pending_document_change_requests(current_user_id)
-    for row in outgoing_document_rows:
-        owner_name = row["owner_full_name"] or row["owner_username"] or active_user_map.get(int(row["owner_user_id"]), "Evrak sahibi")
-        request_label = "Düzenleme" if row["request_type"] == "update" else "Silme"
-        outgoing_items.append(
-            {
-                "title": f"{request_label} onayı bekliyor",
-                "detail": row["document_title"] or "Evrak",
-                "meta": f"Onay: {owner_name}",
-                "href": "/documents",
-                "action": "Evraklara Git",
-                "tone": "info",
-            }
-        )
+    if "tasks.view" in permissions:
+        outgoing_rows = db.list_outgoing_pending_task_change_requests(current_user_id)
+        for row in outgoing_rows:
+            owner_name = row["owner_full_name"] or row["owner_username"] or active_user_map.get(int(row["owner_user_id"]), "Görev sahibi")
+            request_label = "Düzenleme" if row["request_type"] == "update" else "Silme"
+            outgoing_items.append(
+                {
+                    "title": f"{request_label} onayı bekliyor",
+                    "detail": row["task_title"] or "Görev",
+                    "meta": f"Onay: {owner_name}",
+                    "href": "/tasks",
+                    "action": "Görevlere Git",
+                    "tone": "info",
+                }
+            )
+    if "documents.view" in permissions:
+        outgoing_document_rows = db.list_outgoing_pending_document_change_requests(current_user_id)
+        for row in outgoing_document_rows:
+            owner_name = row["owner_full_name"] or row["owner_username"] or active_user_map.get(int(row["owner_user_id"]), "Evrak sahibi")
+            request_label = "Düzenleme" if row["request_type"] == "update" else "Silme"
+            outgoing_items.append(
+                {
+                    "title": f"{request_label} onayı bekliyor",
+                    "detail": row["document_title"] or "Evrak",
+                    "meta": f"Onay: {owner_name}",
+                    "href": "/documents",
+                    "action": "Evraklara Git",
+                    "tone": "info",
+                }
+            )
 
-    overdue_tasks = db.fetch_all(*_build_tasks_query("overdue", current_user_id, is_admin))
-    upcoming_tasks = db.fetch_all(*_build_tasks_query("upcoming", current_user_id, is_admin))
     task_items = []
-    for row in overdue_tasks[:5]:
-        task_items.append(
-            {
-                "title": "Geciken görev",
-                "detail": row["title"],
-                "meta": f"Son tarih: {_format_date_label(row['due_date'])}",
-                "href": "/tasks?filter=overdue",
-                "action": "Aç",
-                "tone": "danger",
-            }
-        )
-    for row in upcoming_tasks[:5]:
-        task_items.append(
-            {
-                "title": "Yaklaşan görev",
-                "detail": row["title"],
-                "meta": f"Son tarih: {_format_date_label(row['due_date'])}",
-                "href": "/tasks?filter=upcoming",
-                "action": "Aç",
-                "tone": "warn",
-            }
-        )
+    if "tasks.view" in permissions:
+        overdue_tasks = db.fetch_all(*_build_tasks_query("overdue", current_user_id, is_admin))
+        upcoming_tasks = db.fetch_all(*_build_tasks_query("upcoming", current_user_id, is_admin))
+        for row in overdue_tasks[:5]:
+            task_items.append(
+                {
+                    "title": "Geciken görev",
+                    "detail": row["title"],
+                    "meta": f"Son tarih: {_format_date_label(row['due_date'])}",
+                    "href": "/tasks?filter=overdue",
+                    "action": "Aç",
+                    "tone": "danger",
+                }
+            )
+        for row in upcoming_tasks[:5]:
+            task_items.append(
+                {
+                    "title": "Yaklaşan görev",
+                    "detail": row["title"],
+                    "meta": f"Son tarih: {_format_date_label(row['due_date'])}",
+                    "href": "/tasks?filter=upcoming",
+                    "action": "Aç",
+                    "tone": "warn",
+                }
+            )
 
-    active_document_items, _ = _build_document_items(current_user_id, is_admin)
-    overdue_docs = _filter_document_items(active_document_items, ["overdue"])[:5]
-    upcoming_docs = _filter_document_items(active_document_items, ["upcoming"])[:5]
     document_items = []
-    for row in overdue_docs:
-        document_items.append(
-            {
-                "title": "Geciken evrak",
-                "detail": row["title"],
-                "meta": f"Tarih: {row['date_label']}",
-                "href": "/documents?filter=overdue",
-                "action": "Aç",
-                "tone": "danger",
-            }
-        )
-    for row in upcoming_docs:
-        document_items.append(
-            {
-                "title": "Yaklaşan evrak",
-                "detail": row["title"],
-                "meta": f"Tarih: {row['date_label']}",
-                "href": "/documents?filter=upcoming",
-                "action": "Aç",
-                "tone": "warn",
-            }
-        )
+    if "documents.view" in permissions:
+        active_document_items, _ = _build_document_items(current_user_id, is_admin)
+        overdue_docs = _filter_document_items(active_document_items, ["overdue"])[:5]
+        upcoming_docs = _filter_document_items(active_document_items, ["upcoming"])[:5]
+        for row in overdue_docs:
+            document_items.append(
+                {
+                    "title": "Geciken evrak",
+                    "detail": row["title"],
+                    "meta": f"Tarih: {row['date_label']}",
+                    "href": "/documents?filter=overdue",
+                    "action": "Aç",
+                    "tone": "danger",
+                }
+            )
+        for row in upcoming_docs:
+            document_items.append(
+                {
+                    "title": "Yaklaşan evrak",
+                    "detail": row["title"],
+                    "meta": f"Tarih: {row['date_label']}",
+                    "href": "/documents?filter=upcoming",
+                    "action": "Aç",
+                    "tone": "warn",
+                }
+            )
 
-    event_rows = db.fetch_all(
-        "SELECT * FROM events "
-        "WHERE event_date <= date('now', 'localtime', '+7 days') "
-        "AND COALESCE(NULLIF(end_date, ''), event_date) >= date('now', 'localtime') "
-        "ORDER BY event_date ASC, title ASC LIMIT 8"
-    )
-    event_items = [
-        {
-            "title": "Yaklaşan etkinlik",
-            "detail": row["title"],
-            "meta": _format_date_range(row["event_date"], row["end_date"]),
-            "href": "/events",
-            "action": "Takvim",
-            "tone": "info",
-        }
-        for row in event_rows
-    ]
+    event_items = []
+    if "events.view" in permissions:
+        event_rows = db.fetch_all(
+            "SELECT * FROM events "
+            "WHERE event_date <= date('now', 'localtime', '+7 days') "
+            "AND COALESCE(NULLIF(end_date, ''), event_date) >= date('now', 'localtime') "
+            "ORDER BY event_date ASC, title ASC LIMIT 8"
+        )
+        event_items = [
+            {
+                "title": "Yaklaşan etkinlik",
+                "detail": row["title"],
+                "meta": _format_date_range(row["event_date"], row["end_date"]),
+                "href": "/events",
+                "action": "Takvim",
+                "tone": "info",
+            }
+            for row in event_rows
+        ]
 
     groups = []
     if int(settings.get("approval_items", 1)):

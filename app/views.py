@@ -1301,28 +1301,72 @@ def render_user_row(item) -> str:
     return f'<article class="user-row"><div class="user-main"><div class="task-cell task-cell-title"><h4>{escape(row_value(item, "full_name") or "-")}</h4></div><div class="task-cell">{escape(row_value(item, "username") or "-")}</div><div class="task-cell">{escape(company_summary)}</div><div class="task-cell">{escape(branch_summary)}</div><div class="task-cell"><span class="priority-chip medium">{escape(row_value(item, "role_names") or "-")}</span></div><div class="task-cell"><span class="status-chip {status_class}">{status_label}</span></div><div class="task-cell user-actions"><a class="mini-link" href="/users?edit={item["id"]}">Düzenle</a>{toggle_action}</div></div></article>'
 
 
-def dashboard_page(summary: dict, tasks: list, documents: list, meetings: list, suppliers: list, events: list, alerts: list, current_user: dict | None = None, allowed_paths: set[str] | None = None, theme: str = "light") -> bytes:
+def _dashboard_primary_action(mv: dict[str, bool]) -> str:
+    options = [
+        ("tasks", "/tasks", "Görevlere Git"),
+        ("documents", "/documents", "Evraklara Git"),
+        ("meetings", "/meetings", "Toplantılara Git"),
+        ("events", "/events", "Takvime Git"),
+        ("suppliers", "/suppliers", "Tedarikçilere Git"),
+    ]
+    for key, href, label in options:
+        if mv.get(key):
+            return f'<a class="button secondary dashboard-toolbar-button" href="{href}">{escape(label)}</a>'
+    return ""
+
+
+def dashboard_page(
+    summary: dict,
+    tasks: list,
+    documents: list,
+    meetings: list,
+    suppliers: list,
+    events: list,
+    alerts: list,
+    module_visibility: dict[str, bool],
+    current_user: dict | None = None,
+    allowed_paths: set[str] | None = None,
+    theme: str = "light",
+) -> bytes:
+    mv = module_visibility
+    stat_cards = []
+    if mv.get("tasks"):
+        stat_cards.append(stat_card("Bekleyen Görev", summary["pending_tasks"], "Bugün odaklanılacak işler", "tone-1"))
+    if mv.get("documents"):
+        stat_cards.append(stat_card("Yaklaşan Evrak", summary["upcoming_documents"], "7 gün içindeki tarihler", "tone-2"))
+    if mv.get("meetings"):
+        stat_cards.append(stat_card("Toplantı Notu", summary["meeting_count"], "Kayıtlı son notlar", "tone-3"))
+    if mv.get("events"):
+        stat_cards.append(stat_card("Etkinlik", summary["event_count"], "Yaklaşan etkinlik kaydı", "tone-4"))
+
+    panels = []
+    if mv.get("tasks"):
+        panels.append(record_panel("Bugünün Görevleri", tasks, render_task_item, "tone-task"))
+    if mv.get("meetings"):
+        panels.append(record_panel("Son Toplantı Notları", meetings, render_meeting_item, "tone-meeting"))
+    if mv.get("documents"):
+        panels.append(record_panel("Yaklaşan Evraklar", documents, render_document_item, "tone-document"))
+    if mv.get("events"):
+        panels.append(record_panel("Yaklaşan Etkinlikler", events, render_event_card, "tone-event"))
+
+    stats_section = (
+        f'<section class="stats-grid dashboard-stats-grid">{"".join(stat_cards)}</section>'
+        if stat_cards
+        else '<p class="empty-state">Bu kullanıcı için görüntülenecek modül özeti yok. Sol menüden yetkili olduğunuz alanlara geçebilirsiniz.</p>'
+    )
+    panels_section = f'<section class="dashboard-panels-grid">{"".join(panels)}</section>' if panels else ""
+
     body = f"""
     <section class="documents-toolbar dashboard-toolbar">
       <div>
         <p class="eyebrow">Genel Bakış</p>
         <h2>Dashboard</h2>
       </div>
-      <a class="button secondary dashboard-toolbar-button" href="/tasks">Görevlere Git</a>
+      {_dashboard_primary_action(mv)}
     </section>
-    <section class="stats-grid dashboard-stats-grid">
-      {stat_card("Bekleyen Görev", summary["pending_tasks"], "Bugün odaklanılacak işler", "tone-1")}
-      {stat_card("Yaklaşan Evrak", summary["upcoming_documents"], "7 gün içindeki tarihler", "tone-2")}
-      {stat_card("Toplantı Notu", summary["meeting_count"], "Kayıtlı son notlar", "tone-3")}
-      {stat_card("Etkinlik", summary["event_count"], "Yaklaşan etkinlik kaydı", "tone-4")}
-    </section>
+    {stats_section}
     {alert_panel(alerts)}
-    <section class="dashboard-panels-grid">
-      {record_panel("Bugünün Görevleri", tasks, render_task_item, "tone-task")}
-      {record_panel("Son Toplantı Notları", meetings, render_meeting_item, "tone-meeting")}
-      {record_panel("Yaklaşan Evraklar", documents, render_document_item, "tone-document")}
-      {record_panel("Yaklaşan Etkinlikler", events, render_event_card, "tone-event")}
-    </section>
+    {panels_section}
     """
     return layout("Dashboard", body, "/", current_user, allowed_paths, theme=theme)
 
