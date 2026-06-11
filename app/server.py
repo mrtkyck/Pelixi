@@ -16,11 +16,13 @@ from datetime import datetime, timedelta
 
 from app import db
 from app.views import (
+    PELIXI_APP_BUILD,
     audit_logs_page,
     backup_settings_page,
     branches_page,
     companies_page,
     dashboard_page,
+    dashboard_task_report_block,
     file_settings_page,
     notification_settings_page,
     documents_dashboard_page_filtered,
@@ -48,6 +50,7 @@ from app.views import (
     format_datetime,
     login_page,
     row_value,
+    first_nonempty_line,
     setup_page,
     forbidden_page,
 )
@@ -190,7 +193,7 @@ class MyNotesHandler(BaseHTTPRequestHandler):
             return
 
         routes = {
-            "/": self.dashboard,
+            "/": lambda: self.dashboard(query),
             "/search": lambda: self.search_page(query),
             "/notifications": self.notifications_page,
             "/notification-settings": lambda: self.notification_settings_page(query),
@@ -263,6 +266,9 @@ class MyNotesHandler(BaseHTTPRequestHandler):
             "/meetings/update": lambda: self._handle_meeting_update(form_data, parsed_body),
             "/meetings/delete": lambda: self._handle_meeting_delete(form_data),
             "/meetings/attachments": lambda: self._handle_meeting_attachment(form_data, uploaded_files),
+            "/meetings/agenda/add": lambda: self._handle_meeting_agenda_add(form_data),
+            "/meetings/agenda/update": lambda: self._handle_meeting_agenda_update(form_data),
+            "/meetings/agenda/delete": lambda: self._handle_meeting_agenda_delete(form_data),
             "/documents": lambda: self._handle_document_create(form_data, parsed_body, uploaded_files),
             "/documents/update": lambda: self._handle_document_update(form_data, parsed_body),
             "/documents/delete": lambda: self._handle_document_delete(form_data),
@@ -280,10 +286,15 @@ class MyNotesHandler(BaseHTTPRequestHandler):
             attachment_id = form_data.get("attachment_id", "").strip()
             module_name = form_data.get("module_name", "").strip()
             record_id = form_data.get("record_id", "").strip()
+            current_user_id = int(self.current_user["id"])
             attachment_name = ""
             if attachment_id.isdigit():
                 attachment = db.get_attachment(int(attachment_id))
                 if attachment:
+                    if module_name == "meetings" and record_id.isdigit():
+                        if not db.user_owns_meeting(int(record_id), current_user_id):
+                            self.redirect(f"/meetings?meeting={record_id}")
+                            return
                     attachment_name = str(attachment["original_name"] or attachment["stored_name"] or "")
                     try:
                         file_path = Path(attachment["file_path"])
@@ -1438,7 +1449,7 @@ class MyNotesHandler(BaseHTTPRequestHandler):
         else:
             self.redirect(parsed.path)
 
-    def dashboard(self) -> None:
+    def dashboard(self, query: dict[str, list[str]]) -> None:
         current_user_id = int(self.current_user["id"])
         perms = self.current_permissions
         is_admin = "admin" in db.get_user_role_codes(current_user_id)
@@ -1462,11 +1473,25 @@ class MyNotesHandler(BaseHTTPRequestHandler):
         meetings = []
         suppliers = []
         events = []
+        task_report_block = ""
 
         if mv["tasks"]:
             visible_active_tasks = db.fetch_all(*_build_tasks_query("all", current_user_id, is_admin))
             summary["pending_tasks"] = len(visible_active_tasks)
             tasks = visible_active_tasks[:5]
+            completed_for_report = db.fetch_all(*_build_completed_tasks_query(current_user_id, is_admin))
+            activity_raw = query.get("activity", ["week"])[0].strip().lower()
+            activity_view = activity_raw if activity_raw in {"week", "month"} else "week"
+            share_users = [user for user in db.list_active_users() if int(user["id"]) != current_user_id]
+            share_roles = db.list_roles()
+            task_report_block = dashboard_task_report_block(
+                visible_active_tasks,
+                completed_for_report,
+                self.current_user,
+                activity_view,
+                share_users,
+                share_roles,
+            )
 
         if mv["documents"]:
             active_document_items, _ = _build_document_items(current_user_id, is_admin)
@@ -1475,8 +1500,16 @@ class MyNotesHandler(BaseHTTPRequestHandler):
             documents = upcoming_document_items[:5]
 
         if mv["meetings"]:
-            summary["meeting_count"] = db.fetch_one("SELECT COUNT(*) AS count FROM meeting_notes")["count"]
-            meetings = db.fetch_all("SELECT * FROM meeting_notes ORDER BY meeting_date DESC LIMIT 5")
+            vis_sql = _meetings_visibility_where_sql()
+            vis_params = _meetings_visibility_params(current_user_id)
+            summary["meeting_count"] = db.fetch_one(
+                f"SELECT COUNT(*) AS count FROM meeting_notes WHERE {vis_sql}",
+                vis_params,
+            )["count"]
+            meetings = db.fetch_all(
+                f"SELECT * FROM meeting_notes WHERE {vis_sql} ORDER BY meeting_date DESC LIMIT 5",
+                vis_params,
+            )
 
         if mv["suppliers"]:
             summary["supplier_count"] = db.fetch_one("SELECT COUNT(*) AS count FROM suppliers")["count"]
@@ -1508,6 +1541,7 @@ class MyNotesHandler(BaseHTTPRequestHandler):
                 self.current_user,
                 self.allowed_paths,
                 theme="light",
+                task_report_block=task_report_block,
             ),
         )
 
@@ -1525,6 +1559,7 @@ class MyNotesHandler(BaseHTTPRequestHandler):
         if raw_query:
             like = f"%{raw_query}%"
             groups = []
+            current_user_id = int(self.current_user["id"])
             if "tasks.view" in perms:
                 task_rows = db.fetch_all(
                     "SELECT id, title, due_date FROM tasks "
@@ -1558,11 +1593,16 @@ class MyNotesHandler(BaseHTTPRequestHandler):
                     }
                 )
             if "meetings.view" in perms:
+                vis_sql = _meetings_visibility_where_sql()
+                vis_params = _meetings_visibility_params(current_user_id)
                 meeting_rows = db.fetch_all(
-                    "SELECT id, title, meeting_date, agenda, notes, decisions FROM meeting_notes "
-                    "WHERE title LIKE ? OR agenda LIKE ? OR notes LIKE ? OR decisions LIKE ? "
-                    "ORDER BY meeting_date DESC LIMIT 8",
-                    (like, like, like, like),
+                    f"SELECT DISTINCT meeting_notes.id, meeting_notes.title, meeting_notes.meeting_date "
+                    f"FROM meeting_notes "
+                    f"LEFT JOIN meeting_agenda_items ON meeting_agenda_items.meeting_id = meeting_notes.id "
+                    f"WHERE {vis_sql} AND (meeting_notes.title LIKE ? OR meeting_notes.notes LIKE ? "
+                    f"OR meeting_notes.decisions LIKE ? OR meeting_agenda_items.body LIKE ?) "
+                    f"ORDER BY meeting_notes.meeting_date DESC LIMIT 8",
+                    vis_params + (like, like, like, like),
                 )
                 groups.append(
                     {
@@ -1652,35 +1692,95 @@ class MyNotesHandler(BaseHTTPRequestHandler):
         if edit_item:
             edit_item = _attach_task_request_state(edit_item, outgoing_request_map)
         feedback = _build_task_feedback(query)
-        activity_view = query.get("activity", ["week"])[0].strip().lower()
-        self.respond(HTTPStatus.OK, tasks_page(active_items, completed_items, share_users, share_roles, owner_requests, request_history, edit_item, can_manage_edit_directly, active_filter, filter_counts, feedback, self.current_user, self.allowed_paths, activity_view))
+        self.respond(
+            HTTPStatus.OK,
+            tasks_page(
+                active_items,
+                completed_items,
+                share_users,
+                share_roles,
+                owner_requests,
+                request_history,
+                edit_item,
+                can_manage_edit_directly,
+                active_filter,
+                filter_counts,
+                feedback,
+                self.current_user,
+                self.allowed_paths,
+            ),
+        )
 
     def meetings_page(self, query: dict[str, list[str]]) -> None:
         active_tab = query.get("tab", ["notes"])[0]
-        items = db.fetch_all("SELECT * FROM meeting_notes ORDER BY meeting_date DESC, id DESC")
+        current_user_id = int(self.current_user["id"])
+        perms = self.current_permissions
+        vis_sql = _meetings_visibility_where_sql()
+        vis_params = _meetings_visibility_params(current_user_id)
+        items = db.fetch_all(
+            f"SELECT * FROM meeting_notes WHERE {vis_sql} ORDER BY meeting_date DESC, id DESC",
+            vis_params,
+        )
         attachment_count_map = db.get_attachment_count_map("meetings", [int(item["id"]) for item in items])
         items = [dict(item) for item in items]
+        first_agenda_preview: dict[int, str] = {}
+        if items:
+            ids_tuple = tuple(int(item["id"]) for item in items)
+            placeholders = ",".join("?" * len(ids_tuple))
+            for ag_row in db.fetch_all(
+                f"SELECT meeting_id, body, id FROM meeting_agenda_items WHERE meeting_id IN ({placeholders}) ORDER BY meeting_id ASC, id ASC",
+                ids_tuple,
+            ):
+                mid_key = int(ag_row["meeting_id"])
+                if mid_key in first_agenda_preview:
+                    continue
+                text = str(ag_row["body"] or "").strip()
+                if text:
+                    first_agenda_preview[mid_key] = text
         for item in items:
             item["_attachment_count"] = attachment_count_map.get(int(item["id"]), 0)
+            mid = int(item["id"])
+            item["_row_can_edit"] = db.user_owns_meeting(mid, current_user_id) and "meetings.edit" in perms
+            item["_row_can_delete"] = db.user_owns_meeting(mid, current_user_id) and "meetings.delete" in perms
+            legacy_line = first_nonempty_line(row_value(item, "agenda"))
+            item["_agenda_preview"] = legacy_line or first_agenda_preview.get(mid) or "-"
+        share_users = [user for user in db.list_active_users() if int(user["id"]) != current_user_id]
+        share_roles = db.list_roles()
         templates = db.fetch_all("SELECT * FROM meeting_templates ORDER BY sort_order ASC, title ASC")
         file_settings = db.get_file_settings()
         selected_item = None
         meeting_id = query.get("meeting", [""])[0]
         if meeting_id.isdigit():
-            selected_item = db.fetch_one("SELECT * FROM meeting_notes WHERE id = ?", (int(meeting_id),))
-            if selected_item:
+            candidate = db.fetch_one("SELECT * FROM meeting_notes WHERE id = ?", (int(meeting_id),))
+            if candidate and db.user_has_meeting_access(int(meeting_id), current_user_id):
                 linked_tasks = db.fetch_all(
                     "SELECT title FROM tasks WHERE related_type = 'meeting' AND related_id = ?",
                     (int(meeting_id),),
                 )
-                selected_item = dict(selected_item)
+                selected_item = dict(candidate)
                 selected_item["_linked_task_titles"] = {row["title"] for row in linked_tasks}
                 selected_item["_attachments"] = [dict(row) for row in db.list_attachments("meetings", int(meeting_id))]
                 selected_item["_file_settings"] = db.get_file_settings()
+                selected_item["_viewer_user_id"] = current_user_id
+                selected_item["_is_owner"] = db.user_owns_meeting(int(meeting_id), current_user_id)
+                selected_item["_can_full_edit"] = bool(selected_item["_is_owner"] and "meetings.edit" in perms)
+                selected_item["_can_add_agenda"] = True
+                selected_item["_can_delete_meeting"] = bool(selected_item["_is_owner"] and "meetings.delete" in perms)
+                selected_item["_can_manage_attachments"] = bool(selected_item["_is_owner"])
+                agenda_rows = [dict(row) for row in db.list_meeting_agenda_items(int(meeting_id))]
+                for ag in agenda_rows:
+                    author_id = int(ag.get("author_user_id") or 0)
+                    ag["_can_edit"] = author_id == current_user_id or selected_item["_is_owner"]
+                    ag["_can_delete"] = author_id == current_user_id or selected_item["_is_owner"]
+                selected_item["_agenda_items"] = agenda_rows
         edit_item = None
         edit_id = query.get("edit", [""])[0]
-        if edit_id.isdigit():
+        if edit_id.isdigit() and selected_item and selected_item.get("_can_full_edit"):
             edit_item = db.fetch_one("SELECT * FROM meeting_notes WHERE id = ?", (int(edit_id),))
+            if edit_item:
+                edit_item = dict(edit_item)
+                edit_item["_share_user_ids"] = db.get_record_user_share_ids("meetings", int(edit_id))
+                edit_item["_share_role_ids"] = db.get_record_role_share_ids("meetings", int(edit_id))
         show_new = query.get("new", [""])[0] == "1"
         feedback = {
             "info": _first_feedback_value(query.get("info", []), {
@@ -1697,7 +1797,20 @@ class MyNotesHandler(BaseHTTPRequestHandler):
                 "attachment_too_large": "Dosya boyutu izin verilen sınırı aşıyor.",
             }),
         }
-        page = meetings_dashboard_page(items, selected_item, templates, active_tab, edit_item, show_new, self.current_user, self.allowed_paths, feedback, file_settings)
+        page = meetings_dashboard_page(
+            items,
+            selected_item,
+            templates,
+            active_tab,
+            edit_item,
+            show_new,
+            self.current_user,
+            self.allowed_paths,
+            feedback,
+            file_settings,
+            share_users,
+            share_roles,
+        )
         self.respond(HTTPStatus.OK, page)
 
     def documents_page(self, query: dict[str, list[str]]) -> None:
@@ -2236,6 +2349,7 @@ class MyNotesHandler(BaseHTTPRequestHandler):
             HTTPStatus.OK,
             file_path.read_bytes(),
             content_type=mime_type or "application/octet-stream",
+            extra_headers=[("Cache-Control", "private, max-age=0, must-revalidate")],
         )
 
     def _save_uploaded_file(self, module_name: str, record_id: int, upload: dict) -> bool:
@@ -2390,6 +2504,10 @@ class MyNotesHandler(BaseHTTPRequestHandler):
     def _handle_meeting_decision_to_task(self, form_data: dict) -> None:
         meeting_id = form_data.get("meeting_id", "").strip()
         decision_text = form_data.get("decision_text", "").strip()
+        user_id = int(self.current_user["id"])
+        if not meeting_id.isdigit() or not db.user_has_meeting_access(int(meeting_id), user_id):
+            self.redirect("/meetings")
+            return
         if decision_text and meeting_id.isdigit():
             existing_task = db.fetch_one(
                 "SELECT id FROM tasks WHERE related_type = 'meeting' AND related_id = ? AND title = ?",
@@ -2411,39 +2529,6 @@ class MyNotesHandler(BaseHTTPRequestHandler):
                     ),
                 )
                 self.audit("Toplantı Kararından Görev Oluşturuldu", "Toplantılar", int(meeting_id), decision_text)
-        self.redirect(f"/meetings?meeting={meeting_id}")
-
-    def _handle_meeting_create(self, form_data: dict, parsed_body: dict, uploaded_files: dict) -> None:
-        title = form_data.get("title", "").strip()
-        if title == "__custom__": title = form_data.get("custom_title", "").strip()
-        
-        upload = uploaded_files.get("attachment")
-        if upload and upload.get("filename") and upload.get("content"):
-            v_err = _validate_uploaded_file(upload, db.get_file_settings())
-            if v_err:
-                self.redirect(f"/meetings?new=1&error={quote(v_err)}")
-                return
-
-        meeting_id = db.execute_insert(
-            "INSERT INTO meeting_notes (title, meeting_date, agenda, decisions, notes) VALUES (?, ?, ?, ?, ?)",
-            (title, form_data.get("meeting_date", ""), _join_form_lines(parsed_body.get("agenda_item", [])), _join_form_lines(parsed_body.get("decision_item", [])), form_data.get("notes", "").strip())
-        )
-        self.audit("Toplantı Eklendi", "Toplantılar", meeting_id, title)
-
-        if upload and upload.get("filename") and upload.get("content"):
-            t_dir = UPLOADS_DIR / "meetings" / str(meeting_id)
-            t_dir.mkdir(parents=True, exist_ok=True)
-            s_name = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(4)}_{_sanitize_filename(upload['filename'])}"
-            t_path = t_dir / s_name
-            t_path.write_bytes(upload["content"])
-            db.add_attachment(
-                "meetings", int(meeting_id), upload["filename"], s_name, str(t_path), 
-                upload.get("content_type", "application/octet-stream"), len(upload["content"]), int(self.current_user["id"])
-            )
-            self.audit("Toplantı Dosyası Eklendi", "Toplantılar", int(meeting_id), upload["filename"])
-            self.redirect(f"/meetings?meeting={meeting_id}&info=meeting_saved_with_attachment")
-            return
-
         self.redirect(f"/meetings?meeting={meeting_id}")
 
     def _handle_document_attachment(self, form_data: dict, uploaded_files: dict) -> None:
@@ -3301,31 +3386,210 @@ class MyNotesHandler(BaseHTTPRequestHandler):
         db.save_file_settings(normalized_extensions, max_file_size_mb)
         self.audit("Dosya Ayarları Kaydedildi", "Dosya Ayarları", details=f"{normalized_extensions} • {max_file_size_mb} MB")
         self.render_file_settings_state(feedback={"info": "Dosya ayarları kaydedildi."})
+
     def _handle_meeting_create(self, form_data: dict, parsed_body: dict, uploaded_files: dict) -> None:
+        user_id = int(self.current_user["id"])
         title = form_data.get("title", "").strip()
-        if title == "__custom__": title = form_data.get("custom_title", "").strip()
+        if title == "__custom__":
+            title = form_data.get("custom_title", "").strip()
+        upload = uploaded_files.get("attachment")
+        if upload and upload.get("filename") and upload.get("content"):
+            v_err = _validate_uploaded_file(upload, db.get_file_settings())
+            if v_err:
+                self.redirect(f"/meetings?new=1&error={quote(v_err)}")
+                return
+
+        share_user_ids = _normalize_share_user_ids(parsed_body.get("share_user_ids", []), user_id)
+        share_role_ids = _normalize_share_role_ids(parsed_body.get("share_role_ids", []))
+        visibility_type = "shared" if (share_user_ids or share_role_ids) else "private"
+        decisions_text = _join_form_lines(parsed_body.get("decision_item", []))
+        notes = form_data.get("notes", "").strip()
+
         meeting_id = db.execute_insert(
-            "INSERT INTO meeting_notes (title, meeting_date, agenda, decisions, notes) VALUES (?, ?, ?, ?, ?)",
-            (title, form_data.get("meeting_date", ""), _join_form_lines(parsed_body.get("agenda_item", [])), _join_form_lines(parsed_body.get("decision_item", [])), form_data.get("notes", "").strip())
+            "INSERT INTO meeting_notes (title, meeting_date, agenda, decisions, notes, owner_user_id, visibility_type, created_by, updated_by) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (title, form_data.get("meeting_date", ""), "", decisions_text, notes, user_id, visibility_type, user_id, user_id),
         )
+        db.replace_record_user_shares("meetings", meeting_id, share_user_ids)
+        db.replace_record_role_shares("meetings", meeting_id, share_role_ids)
+
+        for raw in parsed_body.get("agenda_item", []) or []:
+            line = str(raw).strip()
+            if line and line not in {"Madde 1", "Madde 2"}:
+                db.insert_meeting_agenda_item(meeting_id, line, user_id)
+
+        self.audit("Toplantı Eklendi", "Toplantılar", meeting_id, title)
+
+        if upload and upload.get("filename") and upload.get("content"):
+            t_dir = UPLOADS_DIR / "meetings" / str(meeting_id)
+            t_dir.mkdir(parents=True, exist_ok=True)
+            s_name = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(4)}_{_sanitize_filename(upload['filename'])}"
+            t_path = t_dir / s_name
+            t_path.write_bytes(upload["content"])
+            db.add_attachment(
+                "meetings",
+                int(meeting_id),
+                upload["filename"],
+                s_name,
+                str(t_path),
+                upload.get("content_type", "application/octet-stream"),
+                len(upload["content"]),
+                user_id,
+            )
+            self.audit("Toplantı Dosyası Eklendi", "Toplantılar", int(meeting_id), upload["filename"])
+            self.redirect(f"/meetings?meeting={meeting_id}&info=meeting_saved_with_attachment")
+            return
+
         self.redirect(f"/meetings?meeting={meeting_id}")
 
     def _handle_meeting_update(self, form_data: dict, parsed_body: dict) -> None:
         mid = form_data.get("id", "").strip()
-        if mid.isdigit():
-            db.execute("UPDATE meeting_notes SET title = ?, meeting_date = ?, agenda = ?, decisions = ?, notes = ? WHERE id = ?",
-                       (form_data.get("title", "").strip(), form_data.get("meeting_date", ""), _join_form_lines(parsed_body.get("agenda_item", [])), _join_form_lines(parsed_body.get("decision_item", [])), form_data.get("notes", "").strip(), int(mid)))
-            self.redirect(f"/meetings?meeting={mid}")
+        if not mid.isdigit():
+            self.redirect("/meetings")
+            return
+        meeting_id = int(mid)
+        user_id = int(self.current_user["id"])
+        row = db.fetch_one("SELECT * FROM meeting_notes WHERE id = ?", (meeting_id,))
+        if not row or not db.user_owns_meeting(meeting_id, user_id):
+            self.redirect("/meetings")
+            return
+        share_user_ids = _normalize_share_user_ids(parsed_body.get("share_user_ids", []), user_id)
+        share_role_ids = _normalize_share_role_ids(parsed_body.get("share_role_ids", []))
+        visibility_type = "shared" if (share_user_ids or share_role_ids) else "private"
+        decisions_text = _join_form_lines(parsed_body.get("decision_item", []))
+        title = form_data.get("title", "").strip()
+        if title == "__custom__":
+            title = form_data.get("custom_title", "").strip()
+        db.execute(
+            "UPDATE meeting_notes SET title = ?, meeting_date = ?, decisions = ?, notes = ?, visibility_type = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (
+                title,
+                form_data.get("meeting_date", ""),
+                decisions_text,
+                form_data.get("notes", "").strip(),
+                visibility_type,
+                user_id,
+                meeting_id,
+            ),
+        )
+        db.replace_record_user_shares("meetings", meeting_id, share_user_ids)
+        db.replace_record_role_shares("meetings", meeting_id, share_role_ids)
+        self.audit("Toplantı Güncellendi", "Toplantılar", meeting_id, title)
+        self.redirect(f"/meetings?meeting={mid}&info=meeting_updated")
 
     def _handle_meeting_delete(self, form_data: dict) -> None:
         mid = form_data.get("id", "").strip()
-        if mid.isdigit():
-            db.execute("DELETE FROM meeting_notes WHERE id = ?", (int(mid),))
+        if not mid.isdigit():
             self.redirect("/meetings")
+            return
+        meeting_id = int(mid)
+        user_id = int(self.current_user["id"])
+        if not db.user_owns_meeting(meeting_id, user_id):
+            self.redirect("/meetings")
+            return
+        db.execute("DELETE FROM record_user_shares WHERE module_name = 'meetings' AND record_id = ?", (meeting_id,))
+        db.execute("DELETE FROM record_role_shares WHERE module_name = 'meetings' AND record_id = ?", (meeting_id,))
+        db.execute("DELETE FROM meeting_agenda_items WHERE meeting_id = ?", (meeting_id,))
+        db.execute("DELETE FROM meeting_notes WHERE id = ?", (meeting_id,))
+        self.audit("Toplantı Silindi", "Toplantılar", meeting_id, "")
+        self.redirect("/meetings?info=meeting_deleted")
 
     def _handle_meeting_attachment(self, form_data: dict, uploaded_files: dict) -> None:
         mid = form_data.get("meeting_id", "").strip()
-        if mid.isdigit(): self.redirect(f"/meetings?meeting={mid}")
+        if not mid.isdigit():
+            self.redirect("/meetings")
+            return
+        meeting_id = int(mid)
+        user_id = int(self.current_user["id"])
+        if not db.user_owns_meeting(meeting_id, user_id):
+            self.redirect(f"/meetings?meeting={mid}")
+            return
+        upload = uploaded_files.get("attachment")
+        if not upload or not upload.get("filename") or not upload.get("content"):
+            self.redirect(f"/meetings?meeting={mid}&error=attachment_missing")
+            return
+        validation_error = _validate_uploaded_file(upload, db.get_file_settings())
+        if validation_error:
+            self.redirect(f"/meetings?meeting={mid}&error={quote(validation_error)}")
+            return
+        t_dir = UPLOADS_DIR / "meetings" / str(meeting_id)
+        t_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = _sanitize_filename(upload["filename"])
+        stored_name = f"{datetime.now().strftime('%Y%m%d%H%M%S')}_{secrets.token_hex(4)}_{safe_name}"
+        target_path = t_dir / stored_name
+        target_path.write_bytes(upload["content"])
+        mime_type = upload.get("content_type") or mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+        db.add_attachment(
+            "meetings",
+            meeting_id,
+            upload["filename"],
+            stored_name,
+            str(target_path),
+            mime_type,
+            len(upload["content"]),
+            user_id,
+        )
+        self.audit("Toplantı Dosyası Eklendi", "Toplantılar", meeting_id, upload["filename"])
+        self.redirect(f"/meetings?meeting={mid}&info=attachment_uploaded")
+
+    def _handle_meeting_agenda_add(self, form_data: dict) -> None:
+        mid = form_data.get("meeting_id", "").strip()
+        body = form_data.get("body", "").strip()
+        user_id = int(self.current_user["id"])
+        if not mid.isdigit() or not body:
+            self.redirect("/meetings")
+            return
+        meeting_id = int(mid)
+        if not db.user_has_meeting_access(meeting_id, user_id):
+            self.redirect("/meetings")
+            return
+        db.insert_meeting_agenda_item(meeting_id, body, user_id)
+        self.redirect(f"/meetings?meeting={mid}")
+
+    def _handle_meeting_agenda_update(self, form_data: dict) -> None:
+        item_id = form_data.get("item_id", "").strip()
+        body = form_data.get("body", "").strip()
+        user_id = int(self.current_user["id"])
+        if not item_id.isdigit() or not body:
+            self.redirect("/meetings")
+            return
+        row = db.get_meeting_agenda_item(int(item_id))
+        if not row:
+            self.redirect("/meetings")
+            return
+        meeting_id = int(row["meeting_id"])
+        if not db.user_has_meeting_access(meeting_id, user_id):
+            self.redirect("/meetings")
+            return
+        owner_row = db.fetch_one("SELECT owner_user_id FROM meeting_notes WHERE id = ?", (meeting_id,))
+        owner_id = int(owner_row["owner_user_id"]) if owner_row and owner_row["owner_user_id"] is not None else user_id
+        if not db.update_meeting_agenda_item_body(int(item_id), body, user_id, owner_id):
+            self.redirect(f"/meetings?meeting={meeting_id}")
+            return
+        self.redirect(f"/meetings?meeting={meeting_id}")
+
+    def _handle_meeting_agenda_delete(self, form_data: dict) -> None:
+        item_id = form_data.get("item_id", "").strip()
+        user_id = int(self.current_user["id"])
+        if not item_id.isdigit():
+            self.redirect("/meetings")
+            return
+        row = db.get_meeting_agenda_item(int(item_id))
+        if not row:
+            self.redirect("/meetings")
+            return
+        meeting_id = int(row["meeting_id"])
+        if not db.user_has_meeting_access(meeting_id, user_id):
+            self.redirect("/meetings")
+            return
+        owner_row = db.fetch_one("SELECT owner_user_id FROM meeting_notes WHERE id = ?", (meeting_id,))
+        owner_id = int(owner_row["owner_user_id"]) if owner_row and owner_row["owner_user_id"] is not None else user_id
+        author = int(row["author_user_id"])
+        if author != user_id and user_id != owner_id:
+            self.redirect(f"/meetings?meeting={meeting_id}")
+            return
+        db.delete_meeting_agenda_item(int(item_id))
+        self.redirect(f"/meetings?meeting={meeting_id}")
 
     def _handle_document_create(self, form_data: dict, parsed_body: dict, uploaded_files: dict) -> None:
         kind = form_data.get("kind", "one_time").strip()
@@ -3431,25 +3695,6 @@ class MyNotesHandler(BaseHTTPRequestHandler):
             self.audit("Evrak Silme Talebi Gönderildi", "Evraklar", int(item_id), str(row["title"]))
             self.redirect("/documents?info=document_request_sent")
 
-    def _handle_user_create(self, form_data: dict, parsed_body: dict) -> None:
-        username = form_data.get("username", "").strip()
-        if not db.get_user_by_username(username):
-            db.create_user(username, form_data.get("password", "123456"), form_data.get("full_name", ""), role_codes=[form_data.get("role_code", "ogretmen")])
-        self.redirect("/users")
-
-    def _handle_user_update(self, form_data: dict, parsed_body: dict) -> None:
-        uid = form_data.get("id", "").strip()
-        if uid.isdigit():
-            db.update_user(int(uid), form_data.get("username"), form_data.get("full_name"), form_data.get("email"), form_data.get("phone"), None, [], None, [], True, [form_data.get("role_code", "ogretmen")])
-        self.redirect("/users")
-
-    def _handle_user_toggle(self, form_data: dict) -> None:
-        uid = form_data.get("id", "").strip()
-        if uid.isdigit():
-            user = db.get_user_by_id(int(uid))
-            if user: db.execute("UPDATE users SET is_active = ? WHERE id = ?", (0 if user["is_active"] else 1, int(uid)))
-        self.redirect("/users")
-
     def download_attachment(self, query: dict[str, list[str]]) -> None:
         attachment_id = query.get("id", [""])[0]
         if not attachment_id.isdigit():
@@ -3495,10 +3740,19 @@ class MyNotesHandler(BaseHTTPRequestHandler):
         return parsed_body, form_data, {}
 
     def respond(self, status: HTTPStatus, content: bytes, content_type: str = "text/html; charset=utf-8", extra_headers: list[tuple[str, str]] | None = None) -> None:
+        headers = list(extra_headers or [])
+        keys_lower = {h[0].lower() for h in headers}
+        if (content_type or "").startswith("text/html"):
+            if "cache-control" not in keys_lower:
+                headers.append(("Cache-Control", "private, no-cache, must-revalidate, max-age=0"))
+            if "pragma" not in keys_lower:
+                headers.append(("Pragma", "no-cache"))
+            if "expires" not in keys_lower:
+                headers.append(("Expires", "0"))
         self.send_response(status.value)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
-        for key, value in extra_headers or []:
+        for key, value in headers:
             self.send_header(key, value)
         self.end_headers()
         self.wfile.write(content)
@@ -3582,7 +3836,7 @@ class MyNotesHandler(BaseHTTPRequestHandler):
         next_path = form_data.get("next", "/") or "/"
         user = db.authenticate_user(username, password)
         if not user:
-            self.respond(HTTPStatus.UNAUTHORIZED, login_page("Kullanıcı adı veya şifre hatalı.", next_path))
+            self.respond(HTTPStatus.UNAUTHORIZED, login_page("Kullanıcı adı, e-posta veya şifre hatalı.", next_path))
             return
         session_token = db.create_session(user["id"])
         cookie = f"{AUTH_COOKIE_NAME}={session_token}; Path=/; HttpOnly; SameSite=Lax"
@@ -3640,6 +3894,9 @@ class MyNotesHandler(BaseHTTPRequestHandler):
             "/meetings/update": "meetings.edit",
             "/meetings/delete": "meetings.delete",
             "/meetings/attachments": "attachments.upload",
+            "/meetings/agenda/add": "meetings.view",
+            "/meetings/agenda/update": "meetings.view",
+            "/meetings/agenda/delete": "meetings.view",
             "/meeting-templates": "roles.manage",
             "/meeting-templates/delete": "roles.manage",
             "/meetings/task": "tasks.create",
@@ -3685,8 +3942,11 @@ class MyNotesHandler(BaseHTTPRequestHandler):
 
 def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:
     db.init_db()
+    import app.views as _pelixi_views
+
+    print(f"Pelixi çalışıyor: http://{host}:{port}  [build {PELIXI_APP_BUILD}]")
+    print(f"  Yüklü app.views: {_pelixi_views.__file__}")
     server = ThreadingHTTPServer((host, port), MyNotesHandler)
-    print(f"Pelixi çalışıyor: http://{host}:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -3754,6 +4014,21 @@ def _first_feedback_value(values: list[str], mapping: dict[str, str]) -> str:
         if value in mapping:
             return mapping[value]
     return ""
+
+
+def _meetings_visibility_where_sql() -> str:
+    return (
+        "(meeting_notes.owner_user_id = ? OR EXISTS (SELECT 1 FROM record_user_shares "
+        "WHERE module_name = 'meetings' AND record_id = meeting_notes.id AND user_id = ?) "
+        "OR EXISTS (SELECT 1 FROM record_role_shares "
+        "INNER JOIN user_roles ON user_roles.role_id = record_role_shares.role_id "
+        "WHERE record_role_shares.module_name = 'meetings' AND record_role_shares.record_id = meeting_notes.id "
+        "AND user_roles.user_id = ?))"
+    )
+
+
+def _meetings_visibility_params(user_id: int) -> tuple[int, int, int]:
+    return (user_id, user_id, user_id)
 
 
 def _build_task_visibility_clause(current_user_id: int, is_admin: bool) -> tuple[str, tuple]:

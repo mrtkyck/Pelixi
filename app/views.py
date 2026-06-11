@@ -8,6 +8,73 @@ from urllib.parse import urlencode
 
 from app.firm_service import get_active_user_firm_name, get_user_sidebar_meta
 
+# Stil dosyası sürümü; tarayıcı önbelleğinde eski CSS kalmasını azaltır.
+PELIXI_CSS_VERSION = "20260514h"
+# Dağıtım / çalışan süreç teşhisi: sayfa kaynağında meta veya altta görünür.
+PELIXI_APP_BUILD = "20260514c"
+
+# Tüm chip seçim dropdown'ları (details.event-level-dropdown): dış / başka kontrol tıklanınca kapanır.
+# composedPath + capture: toggle ile yarışmaz; gölge DOM / iç içe hedeflerde ev.target yetersiz kalabiliyordu.
+PELIXI_DROPDOWN_CLOSER_SCRIPT = """
+      <script>
+        (() => {
+          if (window.__pelixiDropdownCloser) return;
+          window.__pelixiDropdownCloser = true;
+          const selector = "details.event-level-dropdown";
+          const list = () => Array.from(document.querySelectorAll(selector));
+          const closeExcept = (keep) => {
+            list().forEach((el) => {
+              if (el !== keep && el.open) el.removeAttribute("open");
+            });
+          };
+          document.addEventListener(
+            "toggle",
+            (ev) => {
+              const t = ev.target;
+              if (!(t instanceof HTMLDetailsElement)) return;
+              if (!t.matches(selector)) return;
+              if (t.open) closeExcept(t);
+            },
+            true
+          );
+          const pathNodes = (ev) => {
+            if (typeof ev.composedPath === "function") {
+              const p = ev.composedPath();
+              if (p && p.length) return p;
+            }
+            const out = [];
+            let n = ev.target;
+            while (n) {
+              out.push(n);
+              n = n.parentNode;
+            }
+            return out;
+          };
+          const closeIfOutsidePath = (ev) => {
+            if (ev.type === "click" && ev.button != null && ev.button !== 0) return;
+            const path = pathNodes(ev);
+            list().forEach((el) => {
+              if (!el.open) return;
+              const inside = path.some((node) => node instanceof Node && el.contains(node));
+              if (!inside) el.removeAttribute("open");
+            });
+          };
+          document.addEventListener("click", closeIfOutsidePath, true);
+          document.addEventListener("pointerdown", closeIfOutsidePath, true);
+          document.addEventListener("keydown", (ev) => {
+            if (ev.key !== "Escape") return;
+            let closed = false;
+            list().forEach((el) => {
+              if (el.open) {
+                el.removeAttribute("open");
+                closed = true;
+              }
+            });
+            if (closed) ev.preventDefault();
+          });
+        })();
+      </script>
+"""
 
 MAIN_NAV_ITEMS = [
     ("/", "Dashboard"),
@@ -194,9 +261,10 @@ def layout(
     <head>
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width, initial-scale=1">
+      <meta name="pelixi-build" content="{escape(PELIXI_APP_BUILD)}">
       <title>{escape(title)} | Pelixi</title>
       <link rel="icon" type="image/png" href="/assets/pelixi-icon.png">
-      <link rel="stylesheet" href="/static/style.css">
+      <link rel="stylesheet" href="/static/style.css?v={PELIXI_CSS_VERSION}">
     </head>
     <body>
       <div class="app-shell">
@@ -215,7 +283,7 @@ def layout(
           </div>
           {user_block}
           <nav class="sidebar-nav">{''.join(nav_links)}</nav>
-          <div class="sidebar-footer-note">© 2026 Murat Kayacık <span class="footer-separator">•</span> v1.0</div>
+          <div class="sidebar-footer-note">© 2026 Murat Kayacık <span class="footer-separator">•</span> v1.1 <span class="footer-separator">•</span> {escape(PELIXI_APP_BUILD)}</div>
         </aside>
         <main class="main-content">{topbar}{body}</main>
       </div>
@@ -307,24 +375,79 @@ def layout(
           }}, true);
         }})();
       </script>
+      {PELIXI_DROPDOWN_CLOSER_SCRIPT}
     </body>
     </html>
     """
     return html.encode("utf-8")
 
 
-def auth_layout(title: str, body: str, card_class: str = "") -> bytes:
+_AUTH_PAGE_SCRIPT = """
+      <script>
+        (() => {
+          const toggles = document.querySelectorAll('[data-password-toggle]');
+          toggles.forEach((button) => {
+            button.addEventListener('click', () => {
+              const targetId = button.getAttribute('data-password-toggle');
+              const input = targetId ? document.getElementById(targetId) : null;
+              if (!input) return;
+              const nextType = input.type === 'password' ? 'text' : 'password';
+              input.type = nextType;
+              button.setAttribute('aria-pressed', nextType === 'text' ? 'true' : 'false');
+            });
+          });
+          const forgotLink = document.querySelector('[data-forgot-password-link]');
+          const forgotNote = document.querySelector('[data-forgot-password-note]');
+          forgotLink?.addEventListener('click', (event) => {
+            event.preventDefault();
+            if (!forgotNote) return;
+            forgotNote.hidden = !forgotNote.hidden;
+          });
+        })();
+      </script>
+"""
+
+
+def auth_layout(title: str, body: str, card_class: str = "", *, promo_panel: str | None = None) -> bytes:
     card_classes = "auth-card" + (f" {card_class}" if card_class else "")
-    html = f"""
+    head = f"""
     <!doctype html>
     <html lang="tr">
     <head>
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width, initial-scale=1">
+      <meta name="pelixi-build" content="{escape(PELIXI_APP_BUILD)}">
       <title>{escape(title)} | Pelixi</title>
       <link rel="icon" type="image/png" href="/assets/pelixi-icon.png">
-      <link rel="stylesheet" href="/static/style.css">
+      <link rel="stylesheet" href="/static/style.css?v={PELIXI_CSS_VERSION}">
     </head>
+"""
+    if promo_panel is not None:
+        body_html = f"""
+    <body class="auth-body auth-body--split">
+      <a class="auth-floating-brand-pill" href="/" aria-label="Pelixi">
+        <img class="auth-floating-brand-pill-icon" src="/assets/pelixi-icon.png" alt="" width="22" height="22" onerror="this.style.display='none'">
+        <span>Pelixi</span>
+      </a>
+      <main class="auth-shell auth-shell--split">
+        <div class="auth-split-grid">
+          <aside class="auth-split-promo">
+            {promo_panel}
+          </aside>
+          <div class="auth-split-card-column">
+            <section class="{card_classes}">
+              {body}
+            </section>
+            <div class="auth-footer-meta auth-footer-meta--below-card">© 2026 Pelixi <span>•</span> Gizlilik <span>•</span> Şartlar</div>
+          </div>
+        </div>
+      </main>
+{_AUTH_PAGE_SCRIPT}
+    </body>
+    </html>
+"""
+    else:
+        body_html = f"""
     <body class="auth-body">
       <main class="auth-shell">
         <div class="auth-stage">
@@ -340,86 +463,74 @@ def auth_layout(title: str, body: str, card_class: str = "") -> bytes:
           <div class="auth-footer-meta">© 2026 Pelixi <span>•</span> Gizlilik <span>•</span> Şartlar</div>
         </div>
       </main>
-      <script>
-        (() => {{
-          const toggles = document.querySelectorAll('[data-password-toggle]');
-          toggles.forEach((button) => {{
-            button.addEventListener('click', () => {{
-              const targetId = button.getAttribute('data-password-toggle');
-              const input = targetId ? document.getElementById(targetId) : null;
-              if (!input) return;
-              const nextType = input.type === 'password' ? 'text' : 'password';
-              input.type = nextType;
-              button.setAttribute('aria-pressed', nextType === 'text' ? 'true' : 'false');
-            }});
-          }});
-
-          const forgotLink = document.querySelector('[data-forgot-password-link]');
-          const forgotNote = document.querySelector('[data-forgot-password-note]');
-          forgotLink?.addEventListener('click', (event) => {{
-            event.preventDefault();
-            if (!forgotNote) return;
-            forgotNote.hidden = !forgotNote.hidden;
-          }});
-        }})();
-      </script>
+{_AUTH_PAGE_SCRIPT}
     </body>
     </html>
-    """
+"""
+    html = head + body_html
     return html.encode("utf-8")
 
 
 def login_page(error: str = "", next_path: str = "/", info: str = "") -> bytes:
     error_html = f'<p class="form-error">{escape(error)}</p>' if error else ""
     info_html = f'<p class="form-info">{escape(info)}</p>' if info else ""
+    promo_panel = """
+      <div class="auth-promo-pill"><span class="auth-promo-pill-dot" aria-hidden="true"></span> İŞ PLATFORUMU</div>
+      <h2 class="auth-promo-title">Görevler, evraklar ve ekip — tek panelde.</h2>
+      <p class="auth-promo-lead">Paylaşım, bildirimler ve ayarlar; güvenli oturumla erişin.</p>
+    """
     body = f"""
-    <div class="auth-copy auth-copy-login">
-      <p class="eyebrow">Giriş</p>
-      <h2>Hoş geldiniz</h2>
-      <p>Sisteme devam etmek için kullanıcı adı ve şifrenizi girin.</p>
+    <div class="auth-login-card-head">
+      <div class="auth-login-card-logo-wrap">
+        <img class="auth-login-card-logo" src="/assets/pelixi-logo.png" alt="Pelixi" onerror="this.style.display='none'; this.nextElementSibling.style.display='inline-flex';">
+        <span class="auth-login-card-logo-fallback" style="display:none;">PELIXI</span>
+      </div>
+      <h1 class="auth-login-card-title">Panele giriş</h1>
+      <p class="auth-login-card-sub">Ayarlar · Kullanıcılar’da tanımlı e-posta veya kullanıcı adı ve şifre ile giriş yapın.</p>
     </div>
     {info_html}
     {error_html}
-    <form method="post" action="/login" class="auth-form auth-form-login">
+    <form method="post" action="/login" class="auth-form auth-form-login auth-form-login--split">
       <input type="hidden" name="next" value="{escape(next_path)}">
       <label class="field auth-field auth-field-login">
-        <span>Kullanıcı Adı veya E-posta</span>
+        <span>E-posta veya kullanıcı adı</span>
         <div class="auth-input-shell">
           <span class="auth-input-icon" aria-hidden="true">
             <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.6"/><path d="M5 19a7 7 0 0 1 14 0"/></svg>
           </span>
-          <input id="login-username" type="text" name="username" required placeholder="Örnek: murat veya mail@ornek.com" autocomplete="username">
+          <input id="login-username" type="text" name="username" required placeholder="ornek@firma.com veya kullaniciadi" autocomplete="username">
         </div>
       </label>
-        <label class="field auth-field auth-field-login">
-          <div class="auth-field-head">
-            <span>Şifre</span>
+      <label class="field auth-field auth-field-login">
+        <div class="auth-field-head">
+          <span>Şifre</span>
           <a class="auth-field-link" href="#" data-forgot-password-link>Şifremi unuttum</a>
-          </div>
-          <div class="auth-input-shell">
-            <span class="auth-input-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><rect x="5.5" y="10" width="13" height="9" rx="2.4"/><path d="M8 10V8a4 4 0 1 1 8 0v2"/></svg>
-            </span>
-            <input id="login-password" type="password" name="password" required placeholder="Şifreniz" autocomplete="current-password">
-            <button class="auth-password-toggle" type="button" data-password-toggle="login-password" aria-label="Şifreyi göster">
-              <svg viewBox="0 0 24 24"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/></svg>
-            </button>
-          </div>
-          <p class="auth-help-note" data-forgot-password-note hidden>Yönetici ile iletişime geçin.</p>
-        </label>
-        <div class="auth-inline-note auth-inline-note-login">
-          <label class="auth-check">
-            <input type="checkbox" name="remember_me" value="1">
-            <span>Bu cihazda beni hatırla</span>
-        </label>
         </div>
-        <button class="button auth-submit" type="submit">
-          <span>Giriş Yap</span>
-          <span class="auth-submit-arrow" aria-hidden="true">→</span>
-        </button>
-      </form>
-      """
-    return auth_layout("Giriş", body)
+        <div class="auth-input-shell auth-input-shell--tint">
+          <span class="auth-input-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><rect x="5.5" y="10" width="13" height="9" rx="2.4"/><path d="M8 10V8a4 4 0 1 1 8 0v2"/></svg>
+          </span>
+          <input id="login-password" type="password" name="password" required placeholder="••••••••" autocomplete="current-password">
+          <button class="auth-password-toggle" type="button" data-password-toggle="login-password" aria-label="Şifreyi göster">
+            <svg viewBox="0 0 24 24"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.8"/></svg>
+          </button>
+        </div>
+        <p class="auth-help-note auth-help-note-forgot" data-forgot-password-note hidden role="status"><span class="auth-help-note-asterisk" aria-hidden="true">*</span> Yönetici ile iletişime geçin.</p>
+      </label>
+      <div class="auth-inline-note auth-inline-note-login">
+        <label class="auth-check">
+          <input type="checkbox" name="remember_me" value="1">
+          <span>Beni hatırla (bu tarayıcı)</span>
+        </label>
+      </div>
+      <button class="button auth-submit auth-submit--split" type="submit">
+        <span>Giriş yap</span>
+        <span class="auth-submit-arrow" aria-hidden="true">→</span>
+      </button>
+    </form>
+    <p class="auth-login-card-tagline">Pelixi · İş platformu · Oturum bu tarayıcıda saklanır.</p>
+    """
+    return auth_layout("Giriş", body, card_class="auth-card-login auth-card-login--split", promo_panel=promo_panel)
 
 
 def setup_page(error: str = "", defaults: dict | None = None) -> bytes:
@@ -1327,6 +1438,7 @@ def dashboard_page(
     current_user: dict | None = None,
     allowed_paths: set[str] | None = None,
     theme: str = "light",
+    task_report_block: str = "",
 ) -> bytes:
     mv = module_visibility
     stat_cards = []
@@ -1364,6 +1476,7 @@ def dashboard_page(
       </div>
       {_dashboard_primary_action(mv)}
     </section>
+    {task_report_block}
     {stats_section}
     {alert_panel(alerts)}
     {panels_section}
@@ -1636,7 +1749,50 @@ def branch_multi_field(branches: list, selected_ids: list[int] | None = None) ->
     return _share_field("Şube", "Şube seçin", "branch_ids", prepared, selected_ids, "display_name", "code")
 
 
-def tasks_page(active_items: list, completed_items: list, share_users: list, share_roles: list, owner_requests: list | None = None, request_history: list | None = None, edit_item=None, edit_can_manage_directly: bool = True, active_filter: str = "all", filter_counts: dict | None = None, feedback: dict | None = None, current_user: dict | None = None, allowed_paths: set[str] | None = None, activity_view: str = "week") -> bytes:
+def render_tasks_page_toolbar() -> str:
+    return """
+    <div class="task-page-toolbar">
+      <div>
+        <p class="eyebrow">Çalışma Alanı</p>
+        <h2 class="task-page-title">Görevler</h2>
+      </div>
+      <div class="task-overview-actions">
+        <form class="task-overview-search" method="get" action="/search">
+          <span class="task-overview-search-icon" aria-hidden="true">⌕</span>
+          <input type="search" name="q" value="" placeholder="Görev, kişi veya etiket ara..." aria-label="Görev arama" />
+          <button class="task-overview-search-button" type="submit">Ara</button>
+        </form>
+        <button class="task-create-button task-create-button-top" type="button" data-open-task-create>
+          <span class="task-create-icon">+</span>
+          <span>Yeni görev ekle</span>
+        </button>
+      </div>
+    </div>
+    """
+
+
+def dashboard_task_report_block(
+    active_items: list,
+    completed_items: list,
+    current_user: dict | None,
+    activity_view: str,
+    share_users: list,
+    share_roles: list,
+) -> str:
+    overview = render_task_overview_v2(
+        active_items,
+        completed_items,
+        current_user,
+        activity_view,
+        activity_href_prefix="/",
+        path_breadcrumb='Dashboard <span>›</span> Görev özeti',
+        shell_extra_class="dashboard-task-report",
+    )
+    form = quick_task_form_v3(share_users, share_roles, "0", show_launcher=False)
+    return f'<div class="dashboard-task-report-wrap">{overview}{form}</div>{task_share_script()}'
+
+
+def tasks_page(active_items: list, completed_items: list, share_users: list, share_roles: list, owner_requests: list | None = None, request_history: list | None = None, edit_item=None, edit_can_manage_directly: bool = True, active_filter: str = "all", filter_counts: dict | None = None, feedback: dict | None = None, current_user: dict | None = None, allowed_paths: set[str] | None = None) -> bytes:
     filter_counts = filter_counts or {}
     owner_requests = owner_requests or []
     request_history = request_history or []
@@ -1647,10 +1803,9 @@ def tasks_page(active_items: list, completed_items: list, share_users: list, sha
     elif feedback.get("info"):
         feedback_html = f'<p class="form-info inline-feedback">{escape(feedback["info"])}</p>'
     auto_open_create = "1" if feedback.get("error") else "0"
-    task_overview = render_task_overview_v2(active_items, completed_items, current_user, activity_view)
     body = f"""
     <section class="documents-shell tasks-shell-v2">
-      {task_overview}
+      {render_tasks_page_toolbar()}
       {feedback_html}
       {quick_task_form_v3(share_users, share_roles, auto_open_create, show_launcher=False)}
       {task_request_panel(owner_requests)}
@@ -1678,7 +1833,16 @@ def tasks_page(active_items: list, completed_items: list, share_users: list, sha
     return layout("Görevler", body, "/tasks", current_user, allowed_paths)
 
 
-def render_task_overview_v2(active_items: list, completed_items: list, current_user: dict | None = None, activity_view: str = "week") -> str:
+def render_task_overview_v2(
+    active_items: list,
+    completed_items: list,
+    current_user: dict | None = None,
+    activity_view: str = "week",
+    *,
+    activity_href_prefix: str = "/tasks",
+    path_breadcrumb: str = 'Çalışma Alanı <span>›</span> Görevler',
+    shell_extra_class: str = "",
+) -> str:
     full_name = ""
     if isinstance(current_user, dict):
         full_name = str(current_user.get("full_name") or current_user.get("username") or "").strip()
@@ -1709,11 +1873,15 @@ def render_task_overview_v2(active_items: list, completed_items: list, current_u
         task_overview_progress_card("Hedef", "Tamamlanma", f"{completion_rate}%", max(6, completion_rate), "Toplam akış", "◎"),
     ]
 
+    shell_class = "task-overview-shell"
+    if shell_extra_class.strip():
+        shell_class = f"{shell_class} {shell_extra_class.strip()}"
+
     return f"""
-    <section class="task-overview-shell">
+    <section class="{shell_class}">
       <div class="task-overview-top">
         <div class="task-overview-copy">
-          <div class="task-overview-path">Çalışma Alanı <span>›</span> Görevler</div>
+          <div class="task-overview-path">{path_breadcrumb}</div>
           <h2>{greeting} <span aria-hidden="true">👋</span></h2>
           <p>{escape(subtitle)}</p>
         </div>
@@ -1731,7 +1899,7 @@ def render_task_overview_v2(active_items: list, completed_items: list, current_u
       </div>
       <div class="task-overview-board">
         {''.join(cards)}
-        {task_weekly_activity_card(active_items, completed_items, activity_view)}
+        {task_weekly_activity_card(active_items, completed_items, activity_view, activity_href_prefix=activity_href_prefix)}
         {task_priority_breakdown_card(active_items)}
       </div>
     </section>
@@ -1768,7 +1936,14 @@ def task_overview_progress_card(tag: str, title: str, value: str, progress: int,
     )
 
 
-def task_weekly_activity_card(active_items: list, completed_items: list, activity_view: str = "week") -> str:
+def _task_activity_toggle_href(prefix: str, view: str) -> str:
+    base = (prefix or "/tasks").strip()
+    if base in {"", "/"}:
+        return f"/?activity={view}"
+    return f"{base.rstrip('/')}?activity={view}"
+
+
+def task_weekly_activity_card(active_items: list, completed_items: list, activity_view: str = "week", *, activity_href_prefix: str = "/tasks") -> str:
     safe_view = "month" if activity_view == "month" else "week"
     today = date.today()
 
@@ -1857,7 +2032,7 @@ def task_weekly_activity_card(active_items: list, completed_items: list, activit
     toggle_links = []
     for value, label in (("week", "Hafta"), ("month", "Ay")):
         css = "task-view-toggle active" if value == safe_view else "task-view-toggle"
-        toggle_links.append(f'<a class="{css}" href="/tasks?activity={value}">{label}</a>')
+        toggle_links.append(f'<a class="{css}" href="{escape(_task_activity_toggle_href(activity_href_prefix, value))}">{label}</a>')
 
     return (
         '<section class="task-analytics-card">'
@@ -2962,14 +3137,7 @@ def event_form_script() -> str:
             if (!inside) closeDialog();
           });
         }
-        const eventForms = [...document.querySelectorAll('.event-inline-form')];
         const levelDropdowns = [...document.querySelectorAll('.event-inline-form [data-event-level-dropdown]')];
-        const closeLevelDropdowns = (exceptNode = null) => {
-          levelDropdowns.forEach((details) => {
-            if (exceptNode && details === exceptNode) return;
-            details.removeAttribute('open');
-          });
-        };
         const updateDropdown = (details) => {
           const summary = details.querySelector('[data-event-level-summary]');
           const checked = [...details.querySelectorAll('input[type="checkbox"]:checked')].map((node) => node.value);
@@ -2982,29 +3150,6 @@ def event_form_script() -> str:
         levelDropdowns.forEach((details) => {
           updateDropdown(details);
           details.addEventListener('change', () => updateDropdown(details));
-          details.addEventListener('toggle', () => {
-            if (!details.open) return;
-            closeLevelDropdowns(details);
-          });
-        });
-        eventForms.forEach((form) => {
-          form.addEventListener('pointerdown', (event) => {
-            const target = event.target;
-            if (!(target instanceof Element)) return;
-            const activeDetails = levelDropdowns.find((details) => details.contains(target));
-            closeLevelDropdowns(activeDetails || null);
-          });
-          form.addEventListener('focusin', (event) => {
-            const target = event.target;
-            if (!(target instanceof Element)) return;
-            const activeDetails = levelDropdowns.find((details) => details.contains(target));
-            closeLevelDropdowns(activeDetails || null);
-          });
-        });
-        document.addEventListener('keydown', (event) => {
-          if (event.key === 'Escape') {
-            closeLevelDropdowns();
-          }
         });
 
         const syncEventDates = (form) => {
@@ -3279,8 +3424,23 @@ def supplier_form_script() -> str:
     """
 
 
-def meetings_workspace_page_v3(items: list, selected_item=None, templates: list | None = None, active_tab: str = "notes", edit_item=None, show_new: bool = False, current_user: dict | None = None, allowed_paths: set[str] | None = None, feedback: dict | None = None, file_settings: dict | None = None) -> bytes:
+def meetings_workspace_page_v3(
+    items: list,
+    selected_item=None,
+    templates: list | None = None,
+    active_tab: str = "notes",
+    edit_item=None,
+    show_new: bool = False,
+    current_user: dict | None = None,
+    allowed_paths: set[str] | None = None,
+    feedback: dict | None = None,
+    file_settings: dict | None = None,
+    share_users: list | None = None,
+    share_roles: list | None = None,
+) -> bytes:
     templates = templates or []
+    share_users = share_users or []
+    share_roles = share_roles or []
     feedback = feedback or {}
     file_settings = file_settings or {}
     feedback_html = ""
@@ -3289,14 +3449,19 @@ def meetings_workspace_page_v3(items: list, selected_item=None, templates: list 
     elif feedback.get("info"):
         feedback_html = f'<p class="form-info inline-feedback">{escape(feedback["info"])}</p>'
     if show_new:
-        content = f'<div class="meeting-action-bar"><div class="meeting-action-group"><a class="mini-link" href="/meetings">Listeye Dön</a></div></div><div class="documents-compact-form meeting-form-panel"><div class="panel-header compact-header"><h3>Yeni Toplantı</h3></div><form method="post" action="/meetings" enctype="multipart/form-data" class="quick-task-form compact-inline-form meeting-editor" data-meeting-editor>{meeting_quick_form_v3(templates, file_settings)}</form></div>'
+        content = f'<div class="meeting-action-bar"><div class="meeting-action-group"><a class="mini-link" href="/meetings">Listeye Dön</a></div></div><div class="documents-compact-form meeting-form-panel"><div class="panel-header compact-header"><h3>Yeni Toplantı</h3></div><form method="post" action="/meetings" enctype="multipart/form-data" class="quick-task-form compact-inline-form meeting-editor" data-meeting-editor>{meeting_quick_form_v3(templates, file_settings, share_users, share_roles)}</form></div>'
     elif edit_item:
-        content = f'<div class="meeting-action-bar"><div class="meeting-action-group"><a class="mini-link" href="/meetings?meeting={edit_item["id"]}">Detaya Dön</a><a class="mini-link" href="/meetings">Listeye Dön</a></div></div>{edit_meeting_panel_v3(edit_item, templates)}'
+        content = f'<div class="meeting-action-bar"><div class="meeting-action-group"><a class="mini-link" href="/meetings?meeting={edit_item["id"]}">Detaya Dön</a><a class="mini-link" href="/meetings">Listeye Dön</a></div></div>{edit_meeting_panel_v3(edit_item, templates, share_users, share_roles)}'
     elif selected_item:
-        content = f'<div class="meeting-action-bar"><div class="meeting-action-group"><a class="mini-link" href="/meetings">Listeye Dön</a><a class="mini-link" href="/meetings?meeting={selected_item["id"]}&edit={selected_item["id"]}">Düzenle</a><form method="post" action="/meetings/delete" class="inline-form"><input type="hidden" name="id" value="{selected_item["id"]}"><button class="mini-link danger" type="submit">Sil</button></form></div></div><div class="documents-table-wrap task-table-panel task-table-panel-completed meeting-detail-page"><div class="panel-header compact-header"><h3>{escape(selected_item["title"])}</h3><span class="badge">{escape(format_date(selected_item["meeting_date"]))}</span></div>{render_meeting_detail_v3(selected_item)}</div>'
+        detail_actions = '<a class="mini-link" href="/meetings">Listeye Dön</a>'
+        if selected_item.get("_can_full_edit"):
+            detail_actions += f'<a class="mini-link" href="/meetings?meeting={selected_item["id"]}&edit={selected_item["id"]}">Düzenle</a>'
+        if selected_item.get("_can_delete_meeting"):
+            detail_actions += f'<form method="post" action="/meetings/delete" class="inline-form"><input type="hidden" name="id" value="{selected_item["id"]}"><button class="mini-link danger" type="submit">Sil</button></form>'
+        content = f'<div class="meeting-action-bar"><div class="meeting-action-group">{detail_actions}</div></div><div class="documents-table-wrap task-table-panel task-table-panel-completed meeting-detail-page"><div class="panel-header compact-header"><h3>{escape(selected_item["title"])}</h3><span class="badge">{escape(format_date(selected_item["meeting_date"]))}</span></div>{render_meeting_detail_v3(selected_item)}</div>'
     else:
         content = f'<div class="task-create-launcher"><a class="task-create-button" href="/meetings?new=1"><span class="task-create-icon">+</span><span>Yeni toplantı ekle</span></a></div><div class="documents-table-wrap task-table-panel task-table-panel-active"><div class="panel-header compact-header"><h3>Toplantı Listesi</h3><span class="badge">{len(items)} kayıt</span></div>{meetings_table_header_v3()}<div class="task-table">{render_meetings_table_v3(items, None)}</div></div>'
-    body = f'<section class="documents-shell meetings-shell"><div class="documents-toolbar"><div><p class="eyebrow">Toplantı</p><h2>Toplantı Notları</h2></div><span class="badge">{len(items)} kayıt</span></div>{feedback_html}{content}</section>{meeting_form_script_v3()}'
+    body = f'<section class="documents-shell meetings-shell"><div class="documents-toolbar"><div><p class="eyebrow">Toplantı</p><h2>Toplantı Notları</h2></div><span class="badge">{len(items)} kayıt</span></div>{feedback_html}{content}</section>{meeting_form_script_v3()}{task_share_script()}'
     return layout("Toplantı Notları", body, "/meetings", current_user, allowed_paths)
 
 
@@ -3319,8 +3484,15 @@ def meeting_templates_page(templates: list, current_user: dict | None = None, al
     return layout("Başlık Ayarları", body, "/meeting-templates", current_user, allowed_paths)
 
 
-def meeting_quick_form_v3(templates: list, file_settings: dict | None = None) -> str:
+def meeting_quick_form_v3(
+    templates: list,
+    file_settings: dict | None = None,
+    share_users: list | None = None,
+    share_roles: list | None = None,
+) -> str:
     file_settings = file_settings or {}
+    share_users = share_users or []
+    share_roles = share_roles or []
     allowed_extensions = row_value(file_settings, "allowed_extensions") or ""
     max_file_size_mb = row_value(file_settings, "max_file_size_mb", 10)
     accept_attr = _build_accept_attr(allowed_extensions)
@@ -3334,13 +3506,23 @@ def meeting_quick_form_v3(templates: list, file_settings: dict | None = None) ->
         f'</label>'
         '</div>'
     )
-    return f'<div class="meeting-create-top-grid">{meeting_title_field_v3(templates)}{file_field}{input_field("meeting_date", "Tarih", input_type="date", value=str(date.today()), required=True)}<div class="meeting-create-submit"><button class="button" type="submit">Kaydet</button></div></div>{meeting_line_editor_v3("Gündem", "agenda_item", ["Madde 1", "Madde 2"])}{meeting_line_editor_v3("Kararlar", "decision_item", ["Karar 1"])}{textarea_field("notes", "Notlar")}'
+    share_block = (
+        f'<div class="meeting-share-grid meeting-form-share-row">'
+        f'{user_share_field(share_users)}'
+        f'{role_share_field(share_roles)}'
+        f"</div>"
+        f'<p class="meeting-share-hint"><small>Paylaşım seçmezseniz toplantı yalnızca size görünür. Paylaştığınız kişiler gündem maddesi ekleyebilir; yalnızca kendi maddelerini düzenleyip silebilir.</small></p>'
+    )
+    return f'<div class="meeting-create-top-grid">{meeting_title_field_v3(templates)}{file_field}{input_field("meeting_date", "Tarih", input_type="date", value=str(date.today()), required=True)}<div class="meeting-create-submit"><button class="button" type="submit">Kaydet</button></div></div>{share_block}{meeting_line_editor_v3("Gündem", "agenda_item", ["Madde 1", "Madde 2"])}{meeting_line_editor_v3("Kararlar", "decision_item", ["Karar 1"])}{textarea_field("notes", "Notlar")}'
 
 
-def edit_meeting_panel_v3(item, templates: list) -> str:
-    agenda_items = split_lines(row_value(item, "agenda")) or [""]
+def edit_meeting_panel_v3(item, templates: list, share_users: list | None = None, share_roles: list | None = None) -> str:
+    share_users = share_users or []
+    share_roles = share_roles or []
     decision_items = split_lines(row_value(item, "decisions")) or [""]
-    return f'<div class="documents-edit-bar meeting-form-panel"><div class="panel-header compact-header"><h3>Toplantıyı Düzenle</h3><a class="text-link" href="/meetings?meeting={item["id"]}">Kapat</a></div><form method="post" action="/meetings/update" class="quick-task-form compact-inline-form meeting-editor" data-meeting-editor><input type="hidden" name="id" value="{item["id"]}">{meeting_title_field_v3(templates, item["title"])}<div class="meeting-form-grid-tail">{input_field("meeting_date", "Tarih", input_type="date", value=item["meeting_date"], required=True)}<button class="button" type="submit">Güncelle</button></div>{meeting_line_editor_v3("Gündem", "agenda_item", agenda_items)}{meeting_line_editor_v3("Kararlar", "decision_item", decision_items)}{textarea_field("notes", "Notlar", row_value(item, "notes") or "")}</form></div>'
+    selected_u = row_value(item, "_share_user_ids", [])
+    selected_r = row_value(item, "_share_role_ids", [])
+    return f'<div class="documents-edit-bar meeting-form-panel"><div class="panel-header compact-header"><h3>Toplantıyı Düzenle</h3><a class="text-link" href="/meetings?meeting={item["id"]}">Kapat</a></div><form method="post" action="/meetings/update" class="quick-task-form compact-inline-form meeting-editor" data-meeting-editor><input type="hidden" name="id" value="{item["id"]}">{meeting_title_field_v3(templates, item["title"])}<div class="meeting-form-grid-tail">{input_field("meeting_date", "Tarih", input_type="date", value=item["meeting_date"], required=True)}<button class="button" type="submit">Güncelle</button></div><div class="meeting-share-grid meeting-form-share-row">{user_share_field(share_users, selected_u)}{role_share_field(share_roles, selected_r)}</div><p class="meeting-share-hint"><small>Gündem maddeleri toplantı detayından yönetilir.</small></p>{meeting_line_editor_v3("Kararlar", "decision_item", decision_items)}{textarea_field("notes", "Notlar", row_value(item, "notes") or "")}</form></div>'
 
 
 def meeting_title_field_v3(templates: list, selected_title: str = "") -> str:
@@ -3378,16 +3560,78 @@ def render_meetings_table_v3(items: list, selected_id: int | None) -> str:
 
 def render_meeting_row_v3(item, selected_id: int | None) -> str:
     row_class = "task-row meeting-row" + (" selected" if selected_id == item["id"] else "")
-    preview = first_nonempty_line(row_value(item, "agenda")) or "-"
+    preview = row_value(item, "_agenda_preview") or first_nonempty_line(row_value(item, "agenda")) or "-"
     attachment_count = int(row_value(item, "_attachment_count", 0) or 0)
     attachment_badge = f'<span class="meeting-attachment-badge">{attachment_count} dosya</span>' if attachment_count else ""
-    return f'<article class="{row_class}"><div class="task-main meeting-main"><div class="task-cell task-cell-title"><h4><a class="supplier-link" href="/meetings?meeting={item["id"]}">{escape(item["title"])}</a></h4>{attachment_badge}</div><div class="task-cell task-cell-date">{escape(format_date(row_value(item, "meeting_date")))}</div><div class="task-cell meeting-preview">{escape(preview)}</div><div class="task-cell task-cell-actions"><div class="row-actions"><a class="mini-link" href="/meetings?meeting={item["id"]}&edit={item["id"]}">Düzenle</a><form method="post" action="/meetings/delete" class="inline-form"><input type="hidden" name="id" value="{item["id"]}"><button class="mini-link danger" type="submit">Sil</button></form></div></div></div></article>'
+    actions = f'<a class="mini-link" href="/meetings?meeting={item["id"]}">Detay</a>'
+    if item.get("_row_can_edit"):
+        actions += f'<a class="mini-link" href="/meetings?meeting={item["id"]}&edit={item["id"]}">Düzenle</a>'
+    if item.get("_row_can_delete"):
+        actions += f'<form method="post" action="/meetings/delete" class="inline-form"><input type="hidden" name="id" value="{item["id"]}"><button class="mini-link danger" type="submit">Sil</button></form>'
+    return f'<article class="{row_class}"><div class="task-main meeting-main"><div class="task-cell task-cell-title"><h4><a class="supplier-link" href="/meetings?meeting={item["id"]}">{escape(item["title"])}</a></h4>{attachment_badge}</div><div class="task-cell task-cell-date">{escape(format_date(row_value(item, "meeting_date")))}</div><div class="task-cell meeting-preview">{escape(preview)}</div><div class="task-cell task-cell-actions"><div class="row-actions">{actions}</div></div></div></article>'
 
 
 def render_meeting_detail_v3(item) -> str:
     if not item:
         return '<p class="empty-state">Detayı görmek için listeden bir toplantı seçin.</p>'
-    return f'<div class="meeting-detail-grid">{meeting_detail_section("Gündem", render_numbered_list_v2(row_value(item, "agenda")))}{meeting_detail_section("Kararlar", render_decision_list_v3(item))}{meeting_detail_section("Notlar", render_notes_text_v2(row_value(item, "notes")))}{meeting_detail_section("Dosyalar", render_meeting_attachments(item))}</div>'
+    agenda_html = render_meeting_agenda_section_v3(item)
+    return f'<div class="meeting-detail-grid">{agenda_html}{meeting_detail_section("Kararlar", render_decision_list_v3(item))}{meeting_detail_section("Notlar", render_notes_text_v2(row_value(item, "notes")))}{meeting_detail_section("Dosyalar", render_meeting_attachments(item))}</div>'
+
+
+def render_meeting_agenda_section_v3(item) -> str:
+    meeting_id = item["id"]
+    rows = item.get("_agenda_items") or []
+    can_add = bool(item.get("_can_add_agenda"))
+    inner_parts: list[str] = []
+    if not rows:
+        inner_parts.append('<p class="empty-state">Henüz gündem maddesi yok.</p>')
+    for index, ag in enumerate(rows, start=1):
+        body = row_value(ag, "body") or ""
+        author = row_value(ag, "author_display") or "-"
+        item_id = ag["id"]
+        can_edit = bool(ag.get("_can_edit"))
+        can_delete = bool(ag.get("_can_delete"))
+        meta = f'<span class="meeting-agenda-author">{escape(author)}</span>'
+        if can_edit:
+            row_body = (
+                f'<form method="post" action="/meetings/agenda/update" class="meeting-agenda-inline-form">'
+                f'<input type="hidden" name="item_id" value="{item_id}">'
+                f'<input type="text" name="body" value="{escape(body)}" class="meeting-agenda-input" required>'
+                f'<button class="mini-link" type="submit">Kaydet</button>'
+                f"</form>"
+            )
+        else:
+            row_body = f'<span class="meeting-detail-text">{escape(body)}</span>'
+        del_form = ""
+        if can_delete:
+            del_form = (
+                f'<form method="post" action="/meetings/agenda/delete" class="inline-form meeting-agenda-delete-form">'
+                f'<input type="hidden" name="item_id" value="{item_id}">'
+                f'<button class="mini-link danger" type="submit">Sil</button></form>'
+            )
+        inner_parts.append(
+            f'<div class="meeting-detail-row meeting-agenda-row">'
+            f'<span class="meeting-detail-index">{index}.</span>'
+            f'<div class="meeting-agenda-cells">{row_body}{meta}{del_form}</div>'
+            f"</div>"
+        )
+    add_block = ""
+    if can_add:
+        add_block = (
+            f'<form method="post" action="/meetings/agenda/add" class="meeting-agenda-add-form compact-inline-form">'
+            f'<input type="hidden" name="meeting_id" value="{meeting_id}">'
+            f'<label class="meeting-agenda-add-label"><span>Yeni madde</span>'
+            f'<input type="text" name="body" placeholder="Gündem maddesi yazın" required></label>'
+            f'<button class="button secondary" type="submit">Ekle</button>'
+            f"</form>"
+        )
+    table = (
+        '<div class="meeting-detail-table meeting-agenda-table"><div class="meeting-detail-head meeting-detail-head-action">'
+        "<span>No</span><span>Madde</span></div>"
+        + "".join(inner_parts)
+        + "</div>"
+    )
+    return meeting_detail_section("Gündem", table + add_block)
 
 
 def meeting_detail_section(title: str, content: str) -> str:
@@ -3429,6 +3673,7 @@ def render_meeting_attachments(item) -> str:
     attachments = item.get("_attachments", []) if isinstance(item, dict) else []
     file_settings = item.get("_file_settings", {}) if isinstance(item, dict) else {}
     meeting_id = item["id"] if isinstance(item, dict) else ""
+    can_manage = bool(item.get("_can_manage_attachments")) if isinstance(item, dict) else True
     allowed_extensions = row_value(file_settings, "allowed_extensions") or ""
     max_file_size_mb = row_value(file_settings, "max_file_size_mb", 10)
     upload_hint = (
@@ -3436,23 +3681,30 @@ def render_meeting_attachments(item) -> str:
         if allowed_extensions
         else ""
     )
-    upload_form = (
-        f'<form method="post" action="/meetings/attachments" enctype="multipart/form-data" class="meeting-attachment-form">'
-        f'<input type="hidden" name="meeting_id" value="{meeting_id}">'
-        f'<label class="meeting-file-picker" data-file-picker><span data-file-label>Dosya seç</span><input type="file" name="attachment" required accept="{escape(_build_accept_attr(allowed_extensions))}" data-file-input data-max-size-mb="{escape(str(max_file_size_mb))}" data-allowed-extensions="{escape(allowed_extensions)}" data-default-label="Dosya seç"></label>'
-        f'<button class="button secondary" type="submit">Yükle</button>'
-        f'</form>'
-    )
+    upload_form = ""
+    if can_manage:
+        upload_form = (
+            f'<form method="post" action="/meetings/attachments" enctype="multipart/form-data" class="meeting-attachment-form">'
+            f'<input type="hidden" name="meeting_id" value="{meeting_id}">'
+            f'<label class="meeting-file-picker" data-file-picker><span data-file-label>Dosya seç</span><input type="file" name="attachment" required accept="{escape(_build_accept_attr(allowed_extensions))}" data-file-input data-max-size-mb="{escape(str(max_file_size_mb))}" data-allowed-extensions="{escape(allowed_extensions)}" data-default-label="Dosya seç"></label>'
+            f'<button class="button secondary" type="submit">Yükle</button>'
+            f"</form>"
+        )
+    elif not attachments:
+        upload_hint += '<p class="meeting-attachment-hint"><small>Dosya yükleme yalnızca toplantı sahibine açıktır.</small></p>'
     if not attachments:
         return upload_hint + upload_form + '<p class="empty-state">Henüz dosya eklenmemiş.</p>'
     rows = []
     for attachment in attachments:
         uploader = row_value(attachment, "uploader_full_name") or row_value(attachment, "uploader_username") or "-"
+        delete_btn = ""
+        if can_manage:
+            delete_btn = f'<form method="post" action="/attachments/delete" class="inline-form"><input type="hidden" name="attachment_id" value="{attachment["id"]}"><input type="hidden" name="module_name" value="meetings"><input type="hidden" name="record_id" value="{meeting_id}"><button class="mini-link danger" type="submit">Sil</button></form>'
         rows.append(
             f'<div class="meeting-attachment-row">'
             f'<div class="meeting-attachment-main"><strong>{escape(row_value(attachment, "original_name") or "Dosya")}</strong><span>{escape(_format_file_size(row_value(attachment, "file_size", 0)))} • {escape(format_datetime(row_value(attachment, "created_at")))} • {escape(uploader)}</span></div>'
-            f'<div class="meeting-attachment-actions"><a class="mini-link" href="/attachments/download?id={attachment["id"]}">İndir</a><form method="post" action="/attachments/delete" class="inline-form"><input type="hidden" name="attachment_id" value="{attachment["id"]}"><input type="hidden" name="module_name" value="meetings"><input type="hidden" name="record_id" value="{meeting_id}"><button class="mini-link danger" type="submit">Sil</button></form></div>'
-            f'</div>'
+            f'<div class="meeting-attachment-actions"><a class="mini-link" href="/attachments/download?id={attachment["id"]}">İndir</a>{delete_btn}</div>'
+            f"</div>"
         )
     return upload_hint + upload_form + f'<div class="meeting-attachment-list">{"".join(rows)}</div>'
 

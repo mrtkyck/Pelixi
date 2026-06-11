@@ -282,6 +282,18 @@ SCHEMA_STATEMENTS = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS meeting_agenda_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        meeting_id INTEGER NOT NULL,
+        body TEXT NOT NULL,
+        author_user_id INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (meeting_id) REFERENCES meeting_notes (id) ON DELETE CASCADE,
+        FOREIGN KEY (author_user_id) REFERENCES users (id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS documents (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL,
@@ -608,6 +620,9 @@ def init_db() -> None:
         _ensure_column(connection, "document_change_requests", "owner_hidden_at", "TEXT")
         _ensure_column(connection, "document_change_requests", "requester_hidden_at", "TEXT")
         _ensure_owned_record_columns(connection)
+        _ensure_meeting_agenda_table(connection)
+        _backfill_meeting_owners_if_needed(connection)
+        _migrate_meeting_agenda_to_items(connection)
         _sync_user_company_links(connection)
         if _is_empty(connection, "meeting_templates"):
             for index, title in enumerate(DEFAULT_MEETING_TEMPLATES, start=1):
@@ -837,6 +852,61 @@ def _ensure_owned_record_columns(connection: sqlite3.Connection) -> None:
         _ensure_column(connection, table_name, "is_archived", "INTEGER NOT NULL DEFAULT 0")
 
 
+def _ensure_meeting_agenda_table(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS meeting_agenda_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            meeting_id INTEGER NOT NULL,
+            body TEXT NOT NULL,
+            author_user_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (meeting_id) REFERENCES meeting_notes (id) ON DELETE CASCADE,
+            FOREIGN KEY (author_user_id) REFERENCES users (id)
+        )
+        """
+    )
+
+
+def _backfill_meeting_owners_if_needed(connection: sqlite3.Connection) -> None:
+    row = connection.execute("SELECT COUNT(*) AS c FROM meeting_notes WHERE owner_user_id IS NULL").fetchone()
+    if not row or int(row["c"]) == 0:
+        return
+    first_user = connection.execute("SELECT id FROM users ORDER BY id ASC LIMIT 1").fetchone()
+    uid = int(first_user["id"]) if first_user else 1
+    connection.execute(
+        "UPDATE meeting_notes SET owner_user_id = ?, visibility_type = COALESCE(NULLIF(TRIM(visibility_type), ''), 'private') "
+        "WHERE owner_user_id IS NULL",
+        (uid,),
+    )
+
+
+def _migrate_meeting_agenda_to_items(connection: sqlite3.Connection) -> None:
+    meetings = connection.execute(
+        "SELECT id, agenda, owner_user_id FROM meeting_notes WHERE TRIM(COALESCE(agenda, '')) != ''"
+    ).fetchall()
+    for m in meetings:
+        mid = int(m["id"])
+        existing = connection.execute(
+            "SELECT COUNT(*) AS c FROM meeting_agenda_items WHERE meeting_id = ?",
+            (mid,),
+        ).fetchone()
+        if existing and int(existing["c"]) > 0:
+            continue
+        owner = int(m["owner_user_id"] or 1)
+        text = str(m["agenda"] or "")
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            connection.execute(
+                "INSERT INTO meeting_agenda_items (meeting_id, body, author_user_id) VALUES (?, ?, ?)",
+                (mid, stripped, owner),
+            )
+        connection.execute("UPDATE meeting_notes SET agenda = '' WHERE id = ?", (mid,))
+
+
 def _seed_roles_and_permissions(connection: sqlite3.Connection) -> None:
     for code, name, description in DEFAULT_ROLES:
         connection.execute(
@@ -1026,7 +1096,10 @@ USER_DETAIL_SQL = (
 
 
 def get_user_by_username(username: str) -> sqlite3.Row | None:
-    return fetch_one("SELECT * FROM users WHERE username = ?", (username,))
+    key = (username or "").strip()
+    if not key:
+        return None
+    return fetch_one("SELECT * FROM users WHERE LOWER(username) = LOWER(?)", (key,))
 
 
 def get_user_by_id(user_id: int) -> sqlite3.Row | None:
@@ -1249,14 +1322,18 @@ def create_user(
 
 
 def authenticate_user(username: str, password: str) -> sqlite3.Row | None:
+    key = (username or "").strip()
+    if not key:
+        return None
     user = fetch_one(
         "SELECT "
         + USER_DETAIL_SELECT +
         "FROM users "
         "LEFT JOIN companies ON companies.id = users.company_id "
         "LEFT JOIN branches ON branches.id = users.branch_id "
-        "WHERE (users.username = ? OR users.email = ?) AND users.is_active = 1",
-        (username.strip(), username.strip()),
+        "WHERE (LOWER(users.username) = LOWER(?) OR LOWER(TRIM(COALESCE(users.email, ''))) = LOWER(?)) "
+        "AND users.is_active = 1",
+        (key, key),
     )
     if not user:
         return None
@@ -1525,6 +1602,75 @@ def replace_record_role_shares(module_name: str, record_id: int, role_ids: list[
                 (module_name, record_id, role_id),
             )
         connection.commit()
+
+
+def user_has_meeting_access(meeting_id: int, user_id: int) -> bool:
+    row = fetch_one("SELECT owner_user_id FROM meeting_notes WHERE id = ?", (meeting_id,))
+    if not row:
+        return False
+    owner_id = row["owner_user_id"]
+    if owner_id is not None and int(owner_id) == int(user_id):
+        return True
+    if fetch_one(
+        "SELECT 1 AS ok FROM record_user_shares WHERE module_name = 'meetings' AND record_id = ? AND user_id = ?",
+        (meeting_id, user_id),
+    ):
+        return True
+    return bool(
+        fetch_one(
+            "SELECT 1 AS ok FROM record_role_shares "
+            "INNER JOIN user_roles ON user_roles.role_id = record_role_shares.role_id "
+            "WHERE record_role_shares.module_name = 'meetings' AND record_role_shares.record_id = ? "
+            "AND user_roles.user_id = ?",
+            (meeting_id, user_id),
+        )
+    )
+
+
+def user_owns_meeting(meeting_id: int, user_id: int) -> bool:
+    row = fetch_one("SELECT owner_user_id FROM meeting_notes WHERE id = ?", (meeting_id,))
+    return bool(row and row["owner_user_id"] is not None and int(row["owner_user_id"]) == int(user_id))
+
+
+def list_meeting_agenda_items(meeting_id: int) -> list[sqlite3.Row]:
+    return fetch_all(
+        "SELECT meeting_agenda_items.*, "
+        "COALESCE(NULLIF(users.full_name, ''), NULLIF(users.username, ''), 'Kullanıcı') AS author_display "
+        "FROM meeting_agenda_items "
+        "LEFT JOIN users ON users.id = meeting_agenda_items.author_user_id "
+        "WHERE meeting_agenda_items.meeting_id = ? "
+        "ORDER BY meeting_agenda_items.id ASC",
+        (meeting_id,),
+    )
+
+
+def insert_meeting_agenda_item(meeting_id: int, body: str, author_user_id: int) -> int:
+    return execute_insert(
+        "INSERT INTO meeting_agenda_items (meeting_id, body, author_user_id) VALUES (?, ?, ?)",
+        (meeting_id, body.strip(), author_user_id),
+    )
+
+
+def get_meeting_agenda_item(item_id: int) -> sqlite3.Row | None:
+    return fetch_one("SELECT * FROM meeting_agenda_items WHERE id = ?", (int(item_id),))
+
+
+def update_meeting_agenda_item_body(item_id: int, body: str, editor_user_id: int, meeting_owner_id: int) -> bool:
+    row = fetch_one("SELECT author_user_id FROM meeting_agenda_items WHERE id = ?", (int(item_id),))
+    if not row:
+        return False
+    author = int(row["author_user_id"])
+    if author != int(editor_user_id) and int(editor_user_id) != int(meeting_owner_id):
+        return False
+    execute(
+        "UPDATE meeting_agenda_items SET body = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+        (body.strip(), int(item_id)),
+    )
+    return True
+
+
+def delete_meeting_agenda_item(item_id: int) -> None:
+    execute("DELETE FROM meeting_agenda_items WHERE id = ?", (int(item_id),))
 
 
 def add_attachment(
